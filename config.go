@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"unicode/utf16"
 	"unicode/utf8"
 	"unsafe"
 )
@@ -36,6 +39,11 @@ type Config struct {
 	ClientIndex int        `json:"client_index"` // GCU MQTT 客户端序号，-1 = 自动探测
 	Items       []ModeItem `json:"items"`        // 模式项，顺序即托盘菜单顺序
 	CurKey      string     `json:"cur_key"`      // 当前选中的档位 Key
+
+	// AutoGCU 连不上 GCU 时自动把后端拉起来（GCUBridge 服务 + GCUService 发布进程）。
+	// 默认开：GCUBridge 服务开机时可能自己异常终止且没有配置恢复动作，
+	// 不开这个就只能等用户手动打开一次官方控制台。
+	AutoGCU bool `json:"auto_gcu"`
 
 	// 启动命令：程序启动后延迟若干秒执行一次，用于 ryzenadj 之类的降压/调优工具
 	RunEnabled bool   `json:"run_enabled"`   // 是否启用
@@ -124,9 +132,17 @@ func defaultConfig() *Config {
 	return &Config{
 		Version:     6,
 		ClientIndex: -1,
+		AutoGCU:     true, // 默认自己把 GCU 后端拉起来，别让用户先去开一次官方控制台
 		Items:       defaultItems(),
 		PlanAlias:   map[string]string{},
 	}
+}
+
+// AutoGCUEnabled 跨线程读「自动拉起 GCU 服务」开关（MQTT 线程要读，故加锁）
+func (c *Config) AutoGCUEnabled() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.AutoGCU
 }
 
 func configDir() string {
@@ -163,6 +179,9 @@ func loadConfig() *Config {
 		RunDelay    int               `json:"run_delay_sec"`
 		RunElevate  bool              `json:"run_elevate"`
 		PlanAlias   map[string]string `json:"plan_alias"`
+		// 用指针区分「配置里没写过」和「显式写了 false」：
+		// 老配置没有这一项，不能因为 Go 的零值就把默认打开的功能关掉。
+		AutoGCU *bool `json:"auto_gcu"`
 
 		Mode    int `json:"mode"`    // v1
 		Profile int `json:"profile"` // v1
@@ -180,6 +199,9 @@ func loadConfig() *Config {
 	cfg.RunArgs = raw.RunArgs
 	cfg.RunDelay = raw.RunDelay
 	cfg.RunElevate = raw.RunElevate
+	if raw.AutoGCU != nil {
+		cfg.AutoGCU = *raw.AutoGCU
+	}
 	cfg.PlanAlias = map[string]string{}
 	for k, v := range raw.PlanAlias {
 		if k != "" && v != "" {
@@ -377,6 +399,15 @@ const (
 	autostartKey     = `Software\Microsoft\Windows\CurrentVersion\Run`
 	autostartValName = "MechrevoMode"
 
+	// 需要管理员权限时改用「登录时触发 + 最高权限」的计划任务。
+	//
+	// 原因是 Windows 的设计：登录时不会把 Run 项 / 启动文件夹里的项提权拉起，
+	// 这类条目会被静默跳过（没有报错、没有事件、任务管理器里仍显示为「已启用」）。
+	// 因此「登录后要跑一个需要管理员权限的常驻程序」只能用计划任务的
+	// RunLevel=HighestAvailable 表达，这也是官方的做法。
+	autostartTaskName  = "MechrevoMode"
+	autostartTaskDelay = "0000:10" // 登录后延迟 10 秒，避开登录阶段的磁盘/服务高峰
+
 	keyAllAccess         = 0x000F003F
 	regOptionNonVolatile = 0
 )
@@ -461,17 +492,230 @@ func exePath() string {
 	return p
 }
 
+// autostartMechanism 记录上一次 applyAutoStart 实际采用的机制。
+//
+// 需要提权时会改用计划任务，这时「任务管理器 → 启动」里看不到本程序，
+// 用户容易以为没设上。所以在界面的保存反馈里把机制讲明。
+var autostartMechanism string
+
+const (
+	autostartViaTask = "计划任务（免 UAC）"
+	autostartViaRun  = "注册表启动项"
+)
+
 func applyAutoStart(enabled bool) error {
 	if !enabled {
 		regDeleteValue(hkeyCurrentUser, autostartKey, autostartValName)
+		removeAutostartTask()
+		autostartMechanism = ""
 		return nil
 	}
-	return regSetString(hkeyCurrentUser, autostartKey, autostartValName, `"`+exePath()+`"`)
+
+	exe := exePath()
+	if exe == "" {
+		return fmt.Errorf("拿不到自身程序路径")
+	}
+
+	if isRunAsAdminSet() {
+		// Run 项在登录时无法提权，改用计划任务
+		if err := createAutostartTask(exe); err != nil {
+			// 退路：至少把 Run 项留着。登录时会弹一次 UAC，用户点「是」也能起来，
+			// 总比什么都不做、用户以为自启开了却毫无反应要好。
+			_ = regSetString(hkeyCurrentUser, autostartKey, autostartValName, `"`+exe+`"`)
+			autostartMechanism = autostartViaRun
+			return fmt.Errorf("建开机自启计划任务失败，已退回注册表 Run 项（登录时可能需手动放行 UAC）：%w", err)
+		}
+		// 计划任务已能覆盖，删掉 Run 项，否则登录时会启动两个实例
+		regDeleteValue(hkeyCurrentUser, autostartKey, autostartValName)
+		autostartMechanism = autostartViaTask
+		return nil
+	}
+
+	// 不需要提权：用 Run 项，用户能在「任务管理器 → 启动」里看到并自行管理
+	removeAutostartTask()
+	if err := regSetString(hkeyCurrentUser, autostartKey, autostartValName, `"`+exe+`"`); err != nil {
+		return err
+	}
+	autostartMechanism = autostartViaRun
+	return nil
 }
 
+// isAutoStartEnabled 注册表 Run 项和计划任务任一存在，都算已启用
 func isAutoStartEnabled() bool {
-	v, ok := regGetString(hkeyCurrentUser, autostartKey, autostartValName)
-	return ok && len(v) > 0
+	if v, ok := regGetString(hkeyCurrentUser, autostartKey, autostartValName); ok && len(v) > 0 {
+		return true
+	}
+	return autostartTaskExe() != ""
+}
+
+// ---------------------------------------------------------------- 开机自启：计划任务
+
+var (
+	autostartMu       sync.Mutex
+	autostartTaskPath string // 已查询到的任务程序路径
+	autostartQueried  bool   // 是否已经查过
+)
+
+// runSchtasks 调 schtasks.exe，带上 CREATE_NO_WINDOW 以免 GUI 程序突然闪一个黑框
+func runSchtasks(args ...string) (string, error) {
+	cmd := exec.Command("schtasks.exe", args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+func queryAutostartTaskExe() string {
+	out, err := runSchtasks("/Query", "/TN", autostartTaskName, "/XML")
+	if err != nil {
+		return ""
+	}
+	const open, close = "<Command>", "</Command>"
+	i := strings.Index(out, open)
+	if i < 0 {
+		return ""
+	}
+	rest := out[i+len(open):]
+	j := strings.Index(rest, close)
+	if j < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:j])
+}
+
+// autostartTaskExe 返回计划任务里登记的程序路径；任务不存在返回 ""。
+// 结果按进程缓存 —— 每次启动都去 schtasks 问一遍没必要，多花一百毫秒。
+func autostartTaskExe() string {
+	autostartMu.Lock()
+	defer autostartMu.Unlock()
+	if !autostartQueried {
+		autostartTaskPath = queryAutostartTaskExe()
+		autostartQueried = true
+	}
+	return autostartTaskPath
+}
+
+func invalidateAutostartTask() {
+	autostartMu.Lock()
+	autostartQueried = false
+	autostartTaskPath = ""
+	autostartMu.Unlock()
+}
+
+func removeAutostartTask() {
+	if autostartTaskExe() == "" {
+		return // 本来就没有，不必去调 schtasks
+	}
+	_, _ = runSchtasks("/Delete", "/F", "/TN", autostartTaskName)
+	invalidateAutostartTask()
+}
+
+// createAutostartTask 注册「登录时触发 + 最高权限」的计划任务。
+//
+// 已经注册且路径没变时直接返回：既省一次注册，也避免在任务正在运行时重写它。
+func createAutostartTask(exe string) error {
+	if cur := autostartTaskExe(); cur == exe {
+		return nil
+	}
+
+	xml := autostartTaskXML(exe)
+	tmp := filepath.Join(configDir(), "autostart_task.xml")
+	// schtasks 认 UTF-16LE + BOM 的 XML（这也是任务计划程序自己导出的格式）
+	if err := os.WriteFile(tmp, utf16LEWithBOM(xml), 0o644); err != nil {
+		return fmt.Errorf("写任务定义失败: %w", err)
+	}
+	defer os.Remove(tmp)
+
+	// 用 /XML 而不是命令行拼 /TR：路径带空格时 /TR 的引号嵌套极易出错，
+	// 而且 XML 里才能写「无执行时限」——默认 72 小时上限会把常驻托盘程序杀掉。
+	if out, err := runSchtasks("/Create", "/F", "/TN", autostartTaskName, "/XML", tmp); err != nil {
+		return fmt.Errorf("schtasks /Create 返回: %v (%s)", err, out)
+	}
+
+	invalidateAutostartTask()
+	if got := autostartTaskExe(); got != exe {
+		return fmt.Errorf("任务写入后回读路径不一致：期望 %q，实际 %q", exe, got)
+	}
+	return nil
+}
+
+func autostartTaskXML(exe string) string {
+	user := os.Getenv("USERNAME")
+	if d := os.Getenv("USERDOMAIN"); d != "" && user != "" {
+		user = d + `\` + user
+	}
+	esc := func(s string) string {
+		return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
+	}
+	// 登录后延迟 + 失败重试，是为了兜住「登录瞬间磁盘/OneDrive 还没就绪」这类偶发情况
+	delay := strings.TrimSpace(autostartTaskDelay)
+	delaySec := 10
+	if len(delay) == 7 { // "0000:10"
+		if n, err := strconv.Atoi(delay[5:]); err == nil {
+			delaySec = n
+		}
+	}
+
+	return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>机械革命模式：登录后自动启动托盘工具。因为需要管理员权限，所以用计划任务而不是注册表 Run 项（登录时不会提权拉起 Run 项）。</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>` + esc(user) + `</UserId>
+      <Delay>PT` + strconv.Itoa(delaySec) + `S</Delay>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>` + esc(user) + `</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>` + esc(exe) + `</Command>
+      <WorkingDirectory>` + esc(filepath.Dir(exe)) + `</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+`
+}
+
+// utf16LEWithBOM schtasks 读 XML 时按声明走 UTF-16，这里给足 BOM。
+func utf16LEWithBOM(s string) []byte {
+	u := utf16.Encode([]rune(s))
+	b := make([]byte, 0, len(u)*2+2)
+	b = append(b, 0xFF, 0xFE)
+	for _, v := range u {
+		b = append(b, byte(v), byte(v>>8))
+	}
+	return b
 }
 
 // ---------------------------------------------------------------- 只读注册表访问（HKLM 无需管理员）

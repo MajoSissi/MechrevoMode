@@ -55,6 +55,7 @@ func layoutFor(n int) uiLayout {
 const (
 	uidAutoStart   = 100
 	uidAutoElevate = 101
+	uidAutoGCU     = 102
 
 	uidRunEnable  = 110
 	uidRunPath    = 111
@@ -107,6 +108,7 @@ type UI struct {
 
 	chkAutoStart   uintptr
 	chkAutoElevate uintptr
+	chkAutoGCU     uintptr
 	rows           [][riCount]uintptr
 	lblStatus      uintptr
 	btnSave        uintptr
@@ -220,6 +222,12 @@ func (u *UI) createControls(n int) {
 	u.chkAutoElevate = u.mk("BUTTON", "以管理员身份运行",
 		btnStyle|bsAutoCheckBox, 170, 14, 160, 22, uidAutoElevate)
 
+	// GCUBridge 服务开机时会自己异常终止（事件 7023），服务上又没有配置失败恢复，
+	// 于是 13688 无人监听、连不上 GCU。勾上这个就由本程序按需把后端拉回来，
+	// 不必再先手动打开一次官方控制台。
+	u.chkAutoGCU = u.mk("BUTTON", "自动拉起 GCU 服务",
+		btnStyle|bsAutoCheckBox, 348, 14, 170, 22, uidAutoGCU)
+
 	// 分组框（模式表）
 	u.mk("BUTTON", "模式 · 托盘菜单 · 图标 · 电源计划",
 		wsChild|wsVisible|bsGroupBox, 12, 40, uiWidth-24, L.modeBoxH, 0)
@@ -319,6 +327,7 @@ func (u *UI) loadFromConfig() {
 	cfg := app.cfg
 	checkDlgButton(u.chkAutoStart, cfg.AutoStart)
 	checkDlgButton(u.chkAutoElevate, cfg.AutoElevate)
+	checkDlgButton(u.chkAutoGCU, cfg.AutoGCU)
 	checkDlgButton(u.chkRun, cfg.RunEnabled)
 	checkDlgButton(u.chkElevate, cfg.RunElevate)
 	setWindowText(u.edRunPath, cfg.RunPath)
@@ -381,6 +390,7 @@ func (u *UI) applyFromControls() {
 	cfg := app.cfg
 	cfg.AutoStart = isChecked(u.chkAutoStart)
 	cfg.AutoElevate = isChecked(u.chkAutoElevate)
+	cfg.AutoGCU = isChecked(u.chkAutoGCU)
 
 	cfg.RunEnabled = isChecked(u.chkRun)
 	cfg.RunElevate = isChecked(u.chkElevate)
@@ -496,7 +506,12 @@ func (u *UI) commit(verbose bool) {
 	}
 	app.onConfigChanged()
 	if verbose {
-		setWindowText(u.lblStatus, "已保存 ✓")
+		msg := "已保存 ✓"
+		if cfg.AutoStart && autostartMechanism != "" {
+			// 需要提权时走的是计划任务，任务管理器里看不到，这里讲明以免用户以为没设上
+			msg = "已保存 ✓ 开机自启：" + autostartMechanism
+		}
+		setWindowText(u.lblStatus, msg)
 	}
 }
 
@@ -569,6 +584,10 @@ func (u *UI) onCommand(id, code int) {
 		return
 	case uidAutoElevate:
 		u.toggleAutoElevate(isChecked(u.chkAutoElevate))
+		return
+	case uidAutoGCU:
+		cfg.AutoGCU = isChecked(u.chkAutoGCU)
+		u.commit(false)
 		return
 	case uidRunEnable:
 		cfg.RunEnabled = isChecked(u.chkRun)

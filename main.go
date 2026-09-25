@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -121,6 +122,22 @@ func lastLogLine(p string) string {
 	return strings.TrimRight(s, "\r")
 }
 
+// looksLikeCloudSync 判断路径是否位于常见的云同步目录里。
+//
+// 只用来给出提示，不做任何拦截 —— 用户把程序放在哪儿是他的自由。
+func looksLikeCloudSync(p string) bool {
+	if p == "" {
+		return false
+	}
+	low := strings.ToLower(p)
+	for _, marker := range []string{`\onedrive`, `\dropbox`, `\googledrive`, `\坚果云`, `\nutstore`} {
+		if strings.Contains(low, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------------------------------------------------------------- 工具
 
 func utf16Buf(s string) []uint16 {
@@ -225,6 +242,99 @@ func testElevate(on bool) {
 	for name, val := range regEnumStringValues(hkeyCurrentUser, appCompatLayersKey) {
 		fmt.Fprintf(f, "  %s = %q\n", name, val)
 	}
+}
+
+// dumpGCU 自检：把 GCU 后端的现状与结构体尺寸写成文件。
+//
+// 「连不上 GCU」可能卡在好几个环节（服务没起 / 发布者没起 / 提权不够），
+// 与其在日志里猜，不如一次把关键事实都摊开。结构体尺寸也要打印 ——
+// Win32 结构体字段错位是静默失效（不报错、只是永远查不到东西），
+// 尺寸对不上基本就能一眼看出。
+func dumpGCU() {
+	f, err := os.Create(filepath.Join(configDir(), "gcu.txt"))
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	fmt.Fprintf(f, "提权                    = %v\n", isElevated())
+	fmt.Fprintf(f, "%s 服务状态 = %d (1=Stopped 4=Running)\n",
+		gcuBridgeService, queryServiceState(gcuBridgeService))
+	fmt.Fprintf(f, "服务 ImagePath          = %s\n", serviceImagePath(gcuBridgeService))
+	fmt.Fprintf(f, "%-23s = %v\n", gcuPublisherExe+" pid", processPIDs(gcuPublisherExe))
+	fmt.Fprintf(f, "%-23s = %v\n", "GCUBridge.exe pid", processPIDs("GCUBridge.exe"))
+	fmt.Fprintf(f, "%-23s = %v\n", "SystrayComponent.exe pid", processPIDs("SystrayComponent.exe"))
+
+	fmt.Fprintln(f, "---- 发布者候选（按尝试顺序）----")
+	for i, c := range publisherCandidates() {
+		st := "不存在"
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			st = fmt.Sprintf("存在 %d 字节", fi.Size())
+		}
+		fmt.Fprintf(f, "%2d  %s  [%s]\n", i, c, st)
+	}
+
+	fmt.Fprintln(f, "---- Win32 结构体尺寸（错位会静默失效，必须对得上）----")
+	fmt.Fprintf(f, "sizeof(STARTUPINFOW)    = %d  (期望 104)\n", unsafe.Sizeof(startupInfo{}))
+	fmt.Fprintf(f, "sizeof(PROCESSENTRY32W) = %d  (期望 568)\n", unsafe.Sizeof(processEntry32W{}))
+	fmt.Fprintf(f, "sizeof(SERVICE_STATUS)  = %d  (期望 28)\n", unsafe.Sizeof(serviceStatus{}))
+}
+
+// testGCULaunch 自检：验证「静默启动一个进程」这条兜底路径本身可用。
+//
+// 兜底路径（broker 在、但发布者不在时，由本程序自己拉起 GCUService）在正常环境下
+// 几乎跑不到 —— 实测 GCUBridge 会监护并重生它自己的子进程 GCUService，
+// 我们还没来得及出手它就自己回来了。可代码没被执行过就等于没验证过，
+// 所以留一个入口，可以指定任意 exe 单独把这条路径跑一遍。
+func testGCULaunch(target string) {
+	f, err := os.Create(filepath.Join(configDir(), "gcu_launch.txt"))
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	// 把每一步都立刻落盘（os.File 的写是直接的系统调用，没有缓冲），
+	// 并且整段套一个 recover：GUI 子系统没有 stderr，panic 跑出去只会
+	// 变成「进程静默消失 + 退出码 2」，什么线索都不剩。
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(f, "!! PANIC: %v\n%s\n", r, debug.Stack())
+			f.Sync()
+		}
+	}()
+
+	if target == "" {
+		fmt.Fprintln(f, "没有指定目标 exe，用法：-test-gcu-launch <exe>")
+		return
+	}
+	fmt.Fprintf(f, "提权            = %v\n", isElevated())
+	fmt.Fprintf(f, "目标            = %s\n", target)
+	if st, err := os.Stat(target); err != nil {
+		fmt.Fprintf(f, "目标不可用      = %v\n", err)
+		return
+	} else {
+		fmt.Fprintf(f, "目标大小        = %d 字节\n", st.Size())
+	}
+
+	fmt.Fprintln(f, "-> 进入 launchHidden")
+	pid, err := launchHidden(target)
+	fmt.Fprintln(f, "-> launchHidden 已返回")
+	fmt.Fprintf(f, "launchHidden    = pid=%d err=%v\n", pid, err)
+	if err != nil || pid == 0 {
+		return
+	}
+	time.Sleep(1500 * time.Millisecond)
+	img := processImageName(pid)
+	want := filepath.Base(target)
+	fmt.Fprintf(f, "1.5 秒后映像名   = %q（期望 %q）一致=%v\n", img, want, strings.EqualFold(img, want))
+
+	if err := terminateProcess(pid); err != nil {
+		fmt.Fprintf(f, "收尾结束进程    = 失败 %v\n", err)
+		return
+	}
+	time.Sleep(500 * time.Millisecond)
+	fmt.Fprintf(f, "收尾后还在吗     = %v（期望 false）\n", processImageName(pid) != "")
+	fmt.Fprintln(f, "=> 结论：三个方向都通过（能起、能按 pid 认出、能收掉）")
 }
 
 // ---------------------------------------------------------------- 状态与图标
@@ -533,9 +643,6 @@ func (a *App) applyPowerPlan(it ModeItem) {
 
 // ---------------------------------------------------------------- 启动命令
 
-// runDoneMark 提权执行时用来判断子进程跑完的标记
-const runDoneMark = "__MM_DONE__"
-
 // splitArgs 按 Windows 命令行惯例拆分参数，支持双引号包裹带空格的片段。
 func splitArgs(s string) []string {
 	var out []string
@@ -563,21 +670,6 @@ func splitArgs(s string) []string {
 	return out
 }
 
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return ""
-	}
-	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
-		s = s[:i]
-	}
-	s = strings.TrimSpace(s)
-	if len(s) > 100 {
-		s = s[:100] + "…"
-	}
-	return s
-}
-
 // normalizePath 把路径里的正斜杠统一成反斜杠。
 //
 // 这一步是必需的：exec.Command 会用 exe 路径本身作为命令行第一个词，
@@ -588,54 +680,37 @@ func normalizePath(p string) string {
 	return filepath.FromSlash(strings.TrimSpace(p))
 }
 
-// execDirect 直接以当前权限执行，能拿到真实退出码
-func execDirect(path string, args []string) (string, error) {
+// execDirect 以当前权限把目标拉起来，不等它跑完、也不读它的输出。
+func execDirect(path string, args []string) error {
 	cmd := exec.Command(path, args...)
 	cmd.Dir = filepath.Dir(path)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+	return cmd.Start()
 }
 
-// execElevated 以管理员身份执行并捕获输出。
+// execElevated 经 ShellExecute 的 "runas" 动作提权拉起目标。
 //
-// ShellExecuteW 的 "runas" 动作会弹 UAC，但拿不到子进程句柄，所以把输出
-// 重定向到临时文件，并在命令末尾追加一个结束标记来判断何时跑完。
-func execElevated(path string, args []string) (string, error) {
-	outFile := filepath.Join(configDir(), "run_output.txt")
-	_ = os.Remove(outFile)
-
+// "runas" 拿不到子进程句柄，因此这里也只能「发起」而不能观察结果 —— 这正好符合
+// 本功能的定位：只负责把命令拉起来，成没生效由用户自己去验证。
+func execElevated(path string, args []string) error {
 	inner := `"` + path + `"`
 	if len(args) > 0 {
 		inner += " " + strings.Join(args, " ")
 	}
-	cmdLine := fmt.Sprintf(`/c %s > "%s" 2>&1 & echo %s >> "%s"`,
-		inner, outFile, runDoneMark, outFile)
-	app.logf("提权命令行: cmd.exe %s", cmdLine)
-
-	if ret := shellExecRunAs(cmdLine, filepath.Dir(path)); ret <= 32 {
+	if ret := shellExecRunAs("/c "+inner, filepath.Dir(path)); ret <= 32 {
 		if ret == 1223 {
-			return "", fmt.Errorf("已取消管理员授权")
+			return errors.New("已取消管理员授权")
 		}
-		return "", fmt.Errorf("提权启动失败（ShellExecute 返回 %d）", ret)
+		return fmt.Errorf("提权启动失败（ShellExecute 返回 %d）", ret)
 	}
-
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(150 * time.Millisecond)
-		b, err := os.ReadFile(outFile)
-		if err != nil {
-			continue
-		}
-		if i := strings.Index(string(b), runDoneMark); i >= 0 {
-			return strings.TrimSpace(string(b[:i])), nil
-		}
-	}
-	return "", fmt.Errorf("提权执行超时（20 秒内未收到完成标记）")
+	return nil
 }
 
-// runStartupCommand 执行配置的命令，返回是否成功与结果摘要。
-// 需要写 MSR 的工具（ryzenadj 等）必须提权，「需要管理员权限」勾选后走 runas 路径。
+// runStartupCommand 把配置的命令拉起来，ok 只表示「有没有成功启动它」。
+//
+// 刻意**不**捕获也不打印它的输出：那是用户自己的命令，跑得对不对由用户自己验证，
+// 本工具不该去解释某个第三方程序的退出码或输出。
+// 「需要管理员权限」勾选后走 runas 路径。
 func (a *App) runStartupCommand() (ok bool, detail string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -657,40 +732,21 @@ func (a *App) runStartupCommand() (ok bool, detail string) {
 		a.logf("启动命令: %s %s", path, strings.Join(args, " "))
 	}
 
-	var out string
 	var err error
 	if elevated {
-		out, err = execElevated(path, args)
+		err = execElevated(path, args)
 	} else {
-		out, err = execDirect(path, args)
+		err = execDirect(path, args)
 	}
-
-	text := out
-	if len(text) > 600 {
-		text = text[:600] + "…"
-	}
-
 	if err != nil {
-		a.logf("启动命令失败: %v\n%s", err, text)
 		msg := err.Error()
 		if !isElevated() && !a.cfg.RunElevate {
 			msg += "；若目标程序需要管理员权限，请勾选「以管理员身份运行」"
 		}
-		if l := firstLine(text); l != "" {
-			msg += "：" + l
-		}
+		a.logf("启动命令未能启动: %s", msg)
 		return false, msg
 	}
-
-	if elevated {
-		a.logf("启动命令完成（提权）\n%s", text)
-	} else {
-		a.logf("启动命令完成\n%s", text)
-	}
-	if l := firstLine(text); l != "" {
-		return true, l
-	}
-	return true, "已执行，无输出"
+	return true, "已启动"
 }
 
 // ---------------------------------------------------------------- 退出
@@ -890,6 +946,18 @@ func main() {
 	}()
 	defer app.recoverLog("main")
 
+	// 先在写本次足迹之前取「上一次运行的最后一条日志」。
+	// 顺序很关键：写完足迹再读，读到的就是本进程刚写的那行，
+	// 于是每次启动都会误报「上次运行未正常结束」，也会让「提权重启:」的交接判断失效。
+	prevLastLine := lastLogLine(logPath)
+
+	// 每次启动都先留一条足迹：提权状态、参数、程序路径。
+	//
+	// 放在所有自检分支之前 —— 那些分支会提前 return，不留痕。
+	// 这样「开机自启到底有没有被拉起来」「是以什么权限起来的」可以直接从日志判断，
+	// 不必再靠猜（之前排查登录自启失败时就吃过没有这条记录的亏）。
+	app.logf("启动 提权=%v 参数=%q 路径=%s", isElevated(), os.Args[1:], exePath())
+
 	// 自检：导出电源计划枚举结果到 %APPDATA%\MechrevoMode\plans.txt
 	if hasArg("-dump-plans") {
 		dumpPlans()
@@ -915,6 +983,18 @@ func main() {
 	// 自检：把托盘图标渲染成放大对照图，便于确认形状
 	if hasArg("-dump-icons") {
 		dumpIcons()
+		return
+	}
+
+	// 自检：输出 GCU 后端现状（只读，不改动任何东西）
+	if hasArg("-dump-gcu") {
+		dumpGCU()
+		return
+	}
+
+	// 自检：验证「静默启动进程」这条兜底路径（会真的起一个进程，随后收掉）
+	if hasArg("-test-gcu-launch") {
+		testGCULaunch(argValue("-test-gcu-launch"))
 		return
 	}
 
@@ -962,16 +1042,25 @@ func main() {
 	// 上一次正常退出会留下「已退出」；提权重启时旧进程会写下「提权重启: ...」
 	// 然后立刻退出，新进程起来读日志时多半还没等到那句「已退出」，
 	// 这属于正常的交接，不能当成异常退出报警。
-	if last := lastLogLine(logPath); last != "" &&
-		!strings.Contains(last, "已退出") &&
-		!strings.Contains(last, "提权重启:") {
-		app.logf("!! 上次运行未正常结束，最后一条日志：%s", last)
+	// 用启动时先取好的 prevLastLine，避免读到本进程刚写的足迹行。
+	if prevLastLine != "" &&
+		!strings.Contains(prevLastLine, "已退出") &&
+		!strings.Contains(prevLastLine, "提权重启:") {
+		app.logf("!! 上次运行未正常结束，最后一条日志：%s", prevLastLine)
 	}
 
 	// 注册表是「开机自启」的权威来源
 	app.cfg.AutoStart = isAutoStartEnabled()
 	if err := applyAutoStart(app.cfg.AutoStart); err != nil {
 		app.logf("同步开机自启失败: %v", err)
+	}
+
+	// 自身在云同步目录里时提醒一句。
+	// 这类目录的文件可能被「按需下载 / 释放空间」解除本地化，只剩一个云端占位，
+	// 登录时无论注册表还是计划任务都拉不起来（而且是静默失败，很难查）。
+	if looksLikeCloudSync(exePath()) {
+		app.logf("提示：程序位于云同步目录（%s）。这类文件可能被「释放空间」变成云端占位，"+
+			"导致登录自启静默失败；挪到普通本地目录最稳妥。", exePath())
 	}
 
 	// 电源方案别名表：模板方案（「卓越性能」）复制出来的 GUID 需要固定下来
@@ -986,6 +1075,8 @@ func main() {
 		}
 	})
 	app.gcu.SetLogger(app.logf)
+	// 「自动拉起 GCU 服务」开关由后台线程按需读取（配置可能随时被界面改掉）
+	app.gcu.SetAutoBackendFn(app.cfg.AutoGCUEnabled)
 
 	if !app.createWindow() {
 		messageBox("机械革命模式", "创建窗口失败，详见日志。")
@@ -1006,8 +1097,9 @@ func main() {
 	// 连上就会把当前真实模式推过来，直接以控制台为准即可。
 	time.AfterFunc(1200*time.Millisecond, app.gcu.Refresh)
 
-	app.logf("启动完成 提权=%v 自启=%v 自动提权标记=%v 托盘项=%v 图标尺寸=%d",
-		isElevated(), app.cfg.AutoStart, app.cfg.AutoElevate, app.cfg.trayItems(), smallIconSize())
+	app.logf("启动完成 提权=%v 自启=%v(%s) 自动提权标记=%v GCU自愈=%v 托盘项=%v 图标尺寸=%d",
+		isElevated(), app.cfg.AutoStart, autostartMechanism, app.cfg.AutoElevate,
+		app.cfg.AutoGCU, app.cfg.trayItems(), smallIconSize())
 
 	// 启动命令：延迟若干秒执行一次（放在 GCU 同步之后，避免被模式切换覆盖）
 	if app.cfg.RunEnabled && strings.TrimSpace(app.cfg.RunPath) != "" {

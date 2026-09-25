@@ -1,0 +1,1 @@
+"C:\Users\Majo\.workbuddy\binaries\python\versions\3.13.12\python.exe" "D:\User\Desktop\MechrevoMode\_research\_e2e_gcu2.py"

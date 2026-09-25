@@ -3,6 +3,9 @@
 package main
 
 import (
+	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -874,3 +877,285 @@ func rgbFromColorref(c uint32) uint32 {
 
 func loword(v uintptr) int { return int(uint16(v & 0xFFFF)) }
 func hiword(v uintptr) int { return int(uint16((v >> 16) & 0xFFFF)) }
+
+// ================================================================ 服务控制 / 进程枚举
+//
+// 用于「GCU 后端自愈」：GCUBridge 是**服务**（提供 MQTT broker），
+// GCUService.exe 是普通进程（真正发布 Fan/Status 的那个）。开机后前者可能自己异常终止，
+// 且没有配置恢复动作，于是 13688 端口无人监听 —— 单靠已有的 API 拉不回来，
+// 必须能「启动服务 + 枚举并启动配套进程」。
+
+var (
+	pOpenSCManagerW     = advapi32.NewProc("OpenSCManagerW")
+	pOpenServiceW       = advapi32.NewProc("OpenServiceW")
+	pQueryServiceStatus = advapi32.NewProc("QueryServiceStatus")
+	pStartServiceW      = advapi32.NewProc("StartServiceW")
+	pCloseServiceHandle = advapi32.NewProc("CloseServiceHandle")
+
+	pCreateToolhelp32Snapshot = kernel32.NewProc("CreateToolhelp32Snapshot")
+	pProcess32FirstW          = kernel32.NewProc("Process32FirstW")
+	pProcess32NextW           = kernel32.NewProc("Process32NextW")
+
+	pOpenProcess      = kernel32.NewProc("OpenProcess")
+	pTerminateProcess = kernel32.NewProc("TerminateProcess")
+	pCreateProcessW   = kernel32.NewProc("CreateProcessW")
+)
+
+const (
+	scManagerConnect   = 0x0001
+	serviceQueryStatus = 0x0004
+	serviceStart       = 0x0010
+
+	svcStopped      = 1
+	svcStartPending = 2
+	svcStopPending  = 3
+	svcRunning      = 4
+
+	errWinAccessDenied   = syscall.Errno(5)
+	errSvcAlreadyRunning = syscall.Errno(1056)
+	errSvcDisabled       = syscall.Errno(1058)
+	errSvcDoesNotExist   = syscall.Errno(1060)
+
+	processTerminate  = 0x0001
+	th32csSnapProcess = 0x00000002
+	procEntryNameLen  = 260
+	createNoWindow    = 0x08000000
+)
+
+// winErr 规范化 LazyProc.Call 的第 3 个返回值。
+//
+// 这个返回值类型是 error，成功时里面装的是 Errno(0) —— 一个**非 nil 的接口**，
+// 直接 `if err != nil` 判断会把成功当失败。所以判失败一律以第 1 个返回值（r1）为准，
+// 只在 r1 表示失败时才用这个函数取错误码。errno 为 0 时给个 EINVAL 兜底，
+// 至少日志里不会是「<nil>」这种没法看的输出。
+func winErr(err error) error {
+	if e, ok := err.(syscall.Errno); ok && e != 0 {
+		return e
+	}
+	if err == nil {
+		return syscall.EINVAL
+	}
+	return syscall.EINVAL
+}
+
+// serviceStatus 对应 Win32 的 SERVICE_STATUS
+type serviceStatus struct {
+	ServiceType             uint32
+	CurrentState            uint32
+	ControlsAccepted        uint32
+	Win32ExitCode           uint32
+	ServiceSpecificExitCode uint32
+	CheckPoint              uint32
+	WaitHint                uint32
+}
+
+// processEntry32W 对应 PROCESSENTRY32W。
+//
+// th32DefaultHeapID 在 C 里是 ULONG_PTR，x64 下必须是 uintptr：
+// 写成 uint32 会让后面所有字段偏移 4 字节，szExeFile 读出来是乱码，
+// 于是「按映像名找进程」永远找不到 —— 而且看起来毫无报错，很难查。
+type processEntry32W struct {
+	Size            uint32
+	Usage           uint32
+	ProcessID       uint32
+	DefaultHeapID   uintptr
+	ModuleID        uint32
+	Threads         uint32
+	ParentProcessID uint32
+	PriClassBase    int32
+	Flags           uint32
+	ExeFile         [procEntryNameLen]uint16
+}
+
+// startupInfo 对应 STARTUPINFOW（x64 下 sizeof = 104）
+type startupInfo struct {
+	Cb              uint32
+	pad0            uint32
+	LpReserved      *uint16
+	LpDesktop       *uint16
+	LpTitle         *uint16
+	DwX             uint32
+	DwY             uint32
+	DwXSize         uint32
+	DwYSize         uint32
+	DwXCountChars   uint32
+	DwYCountChars   uint32
+	DwFillAttribute uint32
+	DwFlags         uint32
+	WShowWindow     uint16
+	CbReserved2     uint16
+	LpReserved2     uintptr
+	HStdInput       uintptr
+	HStdOutput      uintptr
+	HStdError       uintptr
+}
+
+type processInformation struct {
+	HProcess  uintptr
+	HThread   uintptr
+	ProcessID uint32
+	ThreadID  uint32
+}
+
+// serviceHandle 持有 SCM 与服务两个句柄，close 一次全关掉。
+type serviceHandle struct {
+	scm     uintptr
+	service uintptr
+}
+
+func (s serviceHandle) close() {
+	if s.service != 0 {
+		pCloseServiceHandle.Call(s.service)
+	}
+	if s.scm != 0 {
+		pCloseServiceHandle.Call(s.scm)
+	}
+}
+
+// openService 打开服务。失败时返回的 error 是 Win32 错误码（如 5 = 拒绝访问）。
+func openService(name string, access uint32) (serviceHandle, error) {
+	var h serviceHandle
+	scm, _, err := pOpenSCManagerW.Call(0, 0, scManagerConnect)
+	if scm == 0 {
+		return h, winErr(err)
+	}
+	h.scm = scm
+
+	svc, _, err := pOpenServiceW.Call(scm,
+		uintptr(unsafe.Pointer(utf16FromString(name))), uintptr(access))
+	if svc == 0 {
+		e := winErr(err)
+		h.close()
+		return serviceHandle{}, e
+	}
+	h.service = svc
+	return h, nil
+}
+
+// queryServiceState 返回服务状态（svcStopped..svcRunning）；拿不到返回 0。
+func queryServiceState(name string) uint32 {
+	h, err := openService(name, serviceQueryStatus)
+	if err != nil {
+		return 0
+	}
+	defer h.close()
+
+	var st serviceStatus
+	if r, _, _ := pQueryServiceStatus.Call(h.service, uintptr(unsafe.Pointer(&st))); r == 0 {
+		return 0
+	}
+	return st.CurrentState
+}
+
+// processPIDs 按映像名（如 "GCUService.exe"，大小写不敏感）列出所有进程号
+func processPIDs(imageName string) []uint32 {
+	snap, _, _ := pCreateToolhelp32Snapshot.Call(th32csSnapProcess, 0)
+	if snap == 0 || snap == ^uintptr(0) { // INVALID_HANDLE_VALUE
+		return nil
+	}
+	defer closeHandle(snap)
+
+	var pe processEntry32W
+	var out []uint32
+	pe.Size = uint32(unsafe.Sizeof(pe))
+	r, _, _ := pProcess32FirstW.Call(snap, uintptr(unsafe.Pointer(&pe)))
+	for r != 0 {
+		if strings.EqualFold(utf16ToGoStr(pe.ExeFile[:]), imageName) {
+			out = append(out, pe.ProcessID)
+		}
+		pe.Size = uint32(unsafe.Sizeof(pe))
+		r, _, _ = pProcess32NextW.Call(snap, uintptr(unsafe.Pointer(&pe)))
+	}
+	return out
+}
+
+// processImageName 取某个 pid 的映像名（只是文件名，不含路径）；拿不到返回 ""
+func processImageName(pid uint32) string {
+	snap, _, _ := pCreateToolhelp32Snapshot.Call(th32csSnapProcess, 0)
+	if snap == 0 || snap == ^uintptr(0) {
+		return ""
+	}
+	defer closeHandle(snap)
+
+	var pe processEntry32W
+	pe.Size = uint32(unsafe.Sizeof(pe))
+	r, _, _ := pProcess32FirstW.Call(snap, uintptr(unsafe.Pointer(&pe)))
+	for r != 0 {
+		if pe.ProcessID == pid {
+			return utf16ToGoStr(pe.ExeFile[:])
+		}
+		pe.Size = uint32(unsafe.Sizeof(pe))
+		r, _, _ = pProcess32NextW.Call(snap, uintptr(unsafe.Pointer(&pe)))
+	}
+	return ""
+}
+
+// terminateProcess 结束指定进程。
+// 调用方必须先确认 pid 就是自己要收拾的那个进程 —— pid 会被系统复用。
+func terminateProcess(pid uint32) error {
+	h, _, err := pOpenProcess.Call(processTerminate, 0, uintptr(pid))
+	if h == 0 {
+		return winErr(err)
+	}
+	defer closeHandle(h)
+
+	if r, _, err := pTerminateProcess.Call(h, 1); r == 0 {
+		return winErr(err)
+	}
+	return nil
+}
+
+// launchHidden 以当前进程的权限静默启动一个可执行文件，返回新进程 pid。
+//
+// lpApplicationName 传完整路径，可以完全避开「按空格切第一个 token」的解析问题。
+// lpCommandLine 同时也给一份**带引号**的路径：虽然文档允许它留空，
+// 但那样新进程的 GetCommandLine()/argv[0] 就是空的，某些程序会因此行为异常；
+// 两边给同一个值是官方推荐做法，没有副作用。
+// CREATE_NO_WINDOW 让控制台子系统程序连黑框都不闪。
+func launchHidden(exe string) (uint32, error) {
+	exeBuf := utf16FromString(exe)
+	if exeBuf == nil {
+		return 0, syscall.EINVAL
+	}
+	// 这几份 UTF-16 缓冲区必须在本函数里被变量引用着。
+	// 天真的写法是 `uintptr(unsafe.Pointer(utf16FromString(x)))` —— 临时对象一旦
+	// 转成 uintptr 就再也没有 Go 指针指向它，GC 可以在调用前把它回收掉，
+	// 表现是随机的、极难复现的访问违例。用局部变量 + KeepAlive 把生命周期钉住。
+	cmdBuf := utf16FromString(`"` + exe + `"`) // 官方推荐：与 lpApplicationName 给同一个值
+	dirBuf := utf16FromString(filepath.Dir(exe))
+
+	var si startupInfo
+	si.Cb = uint32(unsafe.Sizeof(si))
+	var pi processInformation
+
+	// CreateProcessW 有 10 个形参，顺序一个都不能错。
+	//
+	// 这里的第一个实参曾经多写了一个 0，于是整串参数整体右移一位：
+	// lpApplicationName 变成 NULL，而「指向命令行字符串的指针」被当成
+	// lpProcessAttributes（SECURITY_ATTRIBUTES）交给了内核 —— 内核按结构体去读
+	// 那段字符串，立刻在内核态抛异常。Go 对这类「系统调用里头崩」无法 recover，
+	// 表现是进程静默消失、退出码 2、stderr 一个字都没有（GUI 子系统更是全黑）。
+	// 所以每个实参都标注形参名，以后一眼就能数出来是 10 个。
+	r, _, err := pCreateProcessW.Call(
+		uintptr(unsafe.Pointer(exeBuf)), // lpApplicationName
+		uintptr(unsafe.Pointer(cmdBuf)), // lpCommandLine
+		0,                               // lpProcessAttributes
+		0,                               // lpThreadAttributes
+		0,                               // bInheritHandles
+		createNoWindow,                  // dwCreationFlags
+		0,                               // lpEnvironment
+		uintptr(unsafe.Pointer(dirBuf)), // lpCurrentDirectory
+		uintptr(unsafe.Pointer(&si)),    // lpStartupInfo
+		uintptr(unsafe.Pointer(&pi)),    // lpProcessInformation
+	)
+	runtime.KeepAlive(exeBuf)
+	runtime.KeepAlive(cmdBuf)
+	runtime.KeepAlive(dirBuf)
+
+	if r == 0 {
+		return 0, winErr(err)
+	}
+	closeHandle(pi.HThread)
+	closeHandle(pi.HProcess)
+	return pi.ProcessID, nil
+}
