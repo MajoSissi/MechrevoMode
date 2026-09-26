@@ -29,7 +29,7 @@ type ModeItem struct {
 	PowerPlan string `json:"power_plan"` // 电源计划 GUID；空 = 不改变
 }
 
-// Config 持久化设置，存放在 %APPDATA%\MechrevoMode\config.json
+// Config 持久化设置，存放在**程序同目录**的 data\config.json（见 dataDir）
 type Config struct {
 	mu sync.Mutex `json:"-"`
 
@@ -39,11 +39,6 @@ type Config struct {
 	ClientIndex int        `json:"client_index"` // GCU MQTT 客户端序号，-1 = 自动探测
 	Items       []ModeItem `json:"items"`        // 模式项，顺序即托盘菜单顺序
 	CurKey      string     `json:"cur_key"`      // 当前选中的档位 Key
-
-	// AutoGCU 连不上 GCU 时自动把后端拉起来（GCUBridge 服务 + GCUService 发布进程）。
-	// 默认开：GCUBridge 服务开机时可能自己异常终止且没有配置恢复动作，
-	// 不开这个就只能等用户手动打开一次官方控制台。
-	AutoGCU bool `json:"auto_gcu"`
 
 	// 启动命令：程序启动后延迟若干秒执行一次，用于 ryzenadj 之类的降压/调优工具
 	RunEnabled bool   `json:"run_enabled"`   // 是否启用
@@ -81,14 +76,14 @@ func customKeyOf(i int) string {
 
 func defaultItems() []ModeItem {
 	items := []ModeItem{
-		// 静音（办公模式）
-		{Key: keyOffice, Mode: ModeOffice, Slot: -1, Name: "静音", ShowTray: true,
+		// 办公（GCU 模式 0）。名称带 emoji 是为了在托盘菜单/界面上一眼分辨档位。
+		{Key: keyOffice, Mode: ModeOffice, Slot: -1, Name: "🍃静音", ShowTray: true,
 			IconColor: 0x27AE60, IconGlyph: "E", PowerPlan: planBalanced},
 		// 均衡
-		{Key: keyBalance, Mode: ModeBalance, Slot: -1, Name: "均衡", ShowTray: true,
+		{Key: keyBalance, Mode: ModeBalance, Slot: -1, Name: "❄️均衡", ShowTray: true,
 			IconColor: 0x2F80ED, IconGlyph: "B", PowerPlan: planBalanced},
 		// 狂暴（不再区分子档位，下发时不带 ProfileIndex）
-		{Key: keyTurbo, Mode: ModeTurbo, Slot: -1, Name: "狂暴", ShowTray: true,
+		{Key: keyTurbo, Mode: ModeTurbo, Slot: -1, Name: "🎮狂暴", ShowTray: true,
 			IconColor: 0xE2445C, IconGlyph: "G", PowerPlan: planHighPerf},
 	}
 	// 自定义配色：前三个沿用静音/均衡/狂暴的色系，后两个保持紫色
@@ -114,10 +109,14 @@ func defaultItems() []ModeItem {
 
 // origLabel 该档位在官方控制台里的原始标识。
 // 名称允许用户随便改，这一列用于始终能看清「这行到底对应哪个硬件档位」。
+//
+// 注意这一列**不要**跟默认名称混为一谈：模式 0 的官方叫法是「办公」，
+// 而它的默认显示名称是「🍃静音」。两者都写「静音」的话，用户改了名称之后
+// 这一列就完全失去参照作用了。
 func (m ModeItem) origLabel() string {
 	switch m.Mode {
 	case ModeOffice:
-		return "静音"
+		return "办公"
 	case ModeBalance:
 		return "均衡"
 	case ModeTurbo:
@@ -132,30 +131,114 @@ func defaultConfig() *Config {
 	return &Config{
 		Version:     6,
 		ClientIndex: -1,
-		AutoGCU:     true, // 默认自己把 GCU 后端拉起来，别让用户先去开一次官方控制台
 		Items:       defaultItems(),
 		PlanAlias:   map[string]string{},
 	}
 }
 
-// AutoGCUEnabled 跨线程读「自动拉起 GCU 服务」开关（MQTT 线程要读，故加锁）
-func (c *Config) AutoGCUEnabled() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.AutoGCU
+const (
+	dataSubdirName = "data"         // 程序同目录下的数据目录
+	appDirName     = "MechrevoMode" // 回退目录名（%APPDATA%\MechrevoMode，也是旧版本的位置）
+)
+
+var (
+	dataOnce sync.Once
+	dataPath string
+	dataWhy  string // 目录是怎么选出来的，启动日志里要报一条
+)
+
+// dataDir 数据目录：**程序所在目录下的 data\**（config.json、log.txt、
+// 各种自检输出的落点都在这里），这样整个工具是绿色的，拷到哪配置跟到哪。
+//
+// 程序目录写不进去时（装在 Program Files、运行在只读介质上）退回
+// %APPDATA%\MechrevoMode。宁可换地方存，也不能让「存不下来」变成「程序不能用」——
+// 而且写不进去是静默的，不兜底的话用户只会看到设置每次重启都还原。
+func dataDir() string {
+	dataOnce.Do(resolveDataDir)
+	return dataPath
 }
 
-func configDir() string {
+// dataDirNote 返回目录的选择理由，供启动日志使用
+func dataDirNote() string {
+	dataOnce.Do(resolveDataDir)
+	return dataWhy
+}
+
+func resolveDataDir() {
+	if exe, err := os.Executable(); err == nil {
+		if d := filepath.Join(filepath.Dir(exe), dataSubdirName); dirWritable(d) {
+			dataPath, dataWhy = d, "程序同目录"
+			return
+		}
+	}
 	base, err := os.UserConfigDir()
 	if err != nil || base == "" {
 		base = os.Getenv("APPDATA")
 	}
-	dir := filepath.Join(base, "MechrevoMode")
-	_ = os.MkdirAll(dir, 0o755)
-	return dir
+	if base == "" {
+		base = "." // 连 APPDATA 都没有（极端情况），退回当前工作目录
+	}
+	dataPath = filepath.Join(base, appDirName)
+	dataWhy = "程序目录不可写，回退到 APPDATA"
+	_ = os.MkdirAll(dataPath, 0o755)
 }
 
-func configPath() string { return filepath.Join(configDir(), "config.json") }
+// dirWritable 真的写一个文件试探。只 MkdirAll 判断不出来：目录已存在但没有写权限时
+// MkdirAll 同样返回 nil，于是「数据目录不可写」会退化成「配置静默存不下来」。
+func dirWritable(dir string) bool {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return false
+	}
+	f, err := os.CreateTemp(dir, ".probe-*")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return true
+}
+
+// legacyConfigDir 旧版本的配置位置。只用于一次性迁移，别再往这里写东西。
+func legacyConfigDir() string {
+	base, err := os.UserConfigDir()
+	if err != nil || base == "" {
+		base = os.Getenv("APPDATA")
+	}
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, appDirName)
+}
+
+// migrateLegacyConfig 把旧位置 %APPDATA%\MechrevoMode\config.json 搬到新的数据目录。
+//
+// 不搬的话，升级后用户的模式名称 / 图标字母与底色 / 电源计划 / 开机自启设置会
+// 全部回到默认值，而旧配置还好端端躺在 %APPDATA% 里 —— 这种「设置凭空丢了」
+// 最难解释。搬完把旧文件改名留底：既保留现场，也免得哪天又拿它把新配置覆盖回去。
+func migrateLegacyConfig() {
+	dst := configPath()
+	if _, err := os.Stat(dst); err == nil {
+		return // 新位置已经有配置了，不动
+	}
+	old := legacyConfigDir()
+	if old == "" || old == dataDir() {
+		return
+	}
+	src := filepath.Join(old, "config.json")
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return // 没有旧配置（全新安装），正常路径
+	}
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		app.logf("旧配置迁移失败（%s -> %s）: %v", src, dst, err)
+		return
+	}
+	_ = os.Rename(src, src+".migrated")
+	app.logf("已迁移旧配置: %s -> %s（旧文件改名为 .migrated 留底）", src, dst)
+}
+
+func configPath() string { return filepath.Join(dataDir(), "config.json") }
 
 func loadConfig() *Config {
 	cfg := defaultConfig()
@@ -179,9 +262,6 @@ func loadConfig() *Config {
 		RunDelay    int               `json:"run_delay_sec"`
 		RunElevate  bool              `json:"run_elevate"`
 		PlanAlias   map[string]string `json:"plan_alias"`
-		// 用指针区分「配置里没写过」和「显式写了 false」：
-		// 老配置没有这一项，不能因为 Go 的零值就把默认打开的功能关掉。
-		AutoGCU *bool `json:"auto_gcu"`
 
 		Mode    int `json:"mode"`    // v1
 		Profile int `json:"profile"` // v1
@@ -199,9 +279,6 @@ func loadConfig() *Config {
 	cfg.RunArgs = raw.RunArgs
 	cfg.RunDelay = raw.RunDelay
 	cfg.RunElevate = raw.RunElevate
-	if raw.AutoGCU != nil {
-		cfg.AutoGCU = *raw.AutoGCU
-	}
 	cfg.PlanAlias = map[string]string{}
 	for k, v := range raw.PlanAlias {
 		if k != "" && v != "" {
@@ -228,19 +305,22 @@ func loadConfig() *Config {
 
 // legacyDefaults 各档位在历史版本里用过的默认外观。
 // 只有当配置里的值仍等于旧默认值时才会被升级——用户手动改过的一律保留。
+//
+// 默认名称改成带 emoji 之后，旧的纯文字名称必须补进 names 里，否则
+// 老配置会一直显示「静音/均衡/狂暴」，用户会以为改版没生效。
 var legacyDefaults = map[string]struct {
 	names  []string
 	glyphs []string
 	colors []uint32
 }{
-	keyOffice:  {names: []string{"办公"}, glyphs: []string{"O"}, colors: []uint32{0x2F80ED}},
-	keyBalance: {glyphs: []string{"B"}, colors: []uint32{0x27AE60}},
+	keyOffice:  {names: []string{"办公", "静音"}, glyphs: []string{"O"}, colors: []uint32{0x2F80ED}},
+	keyBalance: {names: []string{"均衡"}, glyphs: []string{"B"}, colors: []uint32{0x27AE60}},
 	keyTurbo: {
-		names:  []string{"游戏狂暴", "高能狂暴", "静音狂暴"},
+		names:  []string{"游戏狂暴", "高能狂暴", "静音狂暴", "狂暴"},
 		glyphs: []string{"G", "S", "T"},
 		colors: []uint32{0xE2445C, 0xF2994A},
 	},
-	// 自定义 1-3 早先默认都是紫色，现在改成与静音/均衡/狂暴同色系
+	// 自定义 1-3 早先默认都是紫色，现在改成与办公/均衡/狂暴同色系
 	customKeyOf(0): {colors: []uint32{0x9B51E0}},
 	customKeyOf(1): {colors: []uint32{0x9B51E0}},
 	customKeyOf(2): {colors: []uint32{0x9B51E0}},
@@ -618,7 +698,7 @@ func createAutostartTask(exe string) error {
 	}
 
 	xml := autostartTaskXML(exe)
-	tmp := filepath.Join(configDir(), "autostart_task.xml")
+	tmp := filepath.Join(dataDir(), "autostart_task.xml")
 	// schtasks 认 UTF-16LE + BOM 的 XML（这也是任务计划程序自己导出的格式）
 	if err := os.WriteFile(tmp, utf16LEWithBOM(xml), 0o644); err != nil {
 		return fmt.Errorf("写任务定义失败: %w", err)

@@ -12,6 +12,13 @@ import sys
 import time
 from ctypes import wintypes
 
+# 本文件是**脚本**：主体全写在模块级，import 它会把里面的副作用原地重跑一遍
+# （曾因此把用户的「开机自启」开关无声地来回拨了两次）。
+# 这行让误 import 立刻失败，而不是安静地把事情做一遍。
+# 要复用里面的函数，请先把它抽到共用模块，而不是 import 这个文件。
+if __name__ != "__main__":
+    raise ImportError("这是脚本不是模块，请用 python 直接运行")
+
 user32 = ctypes.windll.user32
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -32,7 +39,7 @@ user32.SendMessageTimeoutW.restype = wintypes.LPARAM
 user32.EnumChildWindows.argtypes = [wintypes.HWND, ctypes.c_void_p, wintypes.LPARAM]
 
 EXE = r"D:\User\Desktop\MechrevoMode\MechrevoMode.exe"
-CFG = os.path.expandvars(r"%APPDATA%\MechrevoMode\config.json")
+from _paths import CONFIG as CFG  # 数据目录见 _paths.py
 
 UID_RUN_PATH, UID_RUN_BROWSE = 111, 112
 

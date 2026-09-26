@@ -30,7 +30,7 @@ user32.SendMessageTimeoutW.argtypes = [
 user32.SendMessageTimeoutW.restype = wintypes.LPARAM
 
 UID_AUTOSTART, UID_SAVE, UID_STATUS = 100, 900, 910
-CFG = os.path.expandvars(r"%APPDATA%\MechrevoMode\config.json")
+from _paths import CONFIG as CFG  # 数据目录见 _paths.py
 TASK = "MechrevoMode"
 RUNKEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -91,57 +91,63 @@ def state():
             "cfg_auto_start": cfg_autostart()}
 
 
-main = find("MechrevoModeMainWnd")
-if not main:
-    sys.exit("主界面没找到 —— 程序没在运行？")
-p("主窗口 = %d" % main)
+def main():
+    ui = find("MechrevoModeMainWnd")
+    if not ui:
+        sys.exit("主界面没找到 —— 程序没在运行？")
+    p("主窗口 = %d" % ui)
 
-chk = user32.GetDlgItem(main, UID_AUTOSTART)
-btn = user32.GetDlgItem(main, UID_SAVE)
-lbl = user32.GetDlgItem(main, UID_STATUS)
-p("勾选框=%d 保存按钮=%d 状态栏=%d" % (chk, btn, lbl))
-p("当前勾选状态 = %s" % ("已勾选" if user32.SendMessageW(chk, BM_GETCHECK) else "未勾选"))
+    chk = user32.GetDlgItem(ui, UID_AUTOSTART)
+    btn = user32.GetDlgItem(ui, UID_SAVE)
+    lbl = user32.GetDlgItem(ui, UID_STATUS)
+    p("勾选框=%d 保存按钮=%d 状态栏=%d" % (chk, btn, lbl))
+    p("当前勾选状态 = %s" % ("已勾选" if user32.SendMessageW(chk, BM_GETCHECK) else "未勾选"))
 
-p("\n初始状态: %s" % state())
+    p("\n初始状态: %s" % state())
 
-results = []
+    results = []
+
+    def do(label, want_checked):
+        user32.SendMessageW(chk, BM_SETCHECK, BST_CHECKED if want_checked else BST_UNCHECKED, 0)
+        time.sleep(0.3)
+        user32.PostMessageW(btn, BM_CLICK, 0, 0)
+        time.sleep(2.5)  # schtasks 走进程，给足时间
+        st = state()
+        status_text = wtext(lbl)
+        p("\n=== %s ===" % label)
+        p("  勾选状态  : %s" % ("已勾选" if user32.SendMessageW(chk, BM_GETCHECK) else "未勾选"))
+        p("  计划任务  : %s" % (st["task"] or "(无)"))
+        p("  注册表Run : %s" % (st["run"] or "(无)"))
+        p("  auto_start: %s" % st["cfg_auto_start"])
+        p("  状态栏    : %r" % status_text)
+
+        if want_checked:
+            ok = (st["task"] != "" and st["run"] == ""
+                  and st["cfg_auto_start"] is True)
+            p("  => %s（要求：有任务、无 Run 项、auto_start=true）" % ("通过" if ok else "不通过"))
+        else:
+            ok = (st["task"] == "" and st["run"] == ""
+                  and st["cfg_auto_start"] is False)
+            p("  => %s（要求：任务与 Run 项都清空、auto_start=false）" % ("通过" if ok else "不通过"))
+        results.append((label, ok))
+        return st
+
+    # 先关：验证「关闭」把两种机制都清掉
+    do("第 1 步：取消勾选并保存", False)
+    # 再开：验证需要提权时走计划任务、且不重复写 Run 项
+    do("第 2 步：重新勾选并保存", True)
+
+    p("\n" + "=" * 62)
+    p("总结")
+    p("=" * 62)
+    for label, ok in results:
+        p("  %-28s %s" % (label, "PASS" if ok else "FAIL"))
+    p("  最终状态: %s" % state())
+    return 0 if all(ok for _l, ok in results) else 1
 
 
-def do(label, want_checked):
-    user32.SendMessageW(chk, BM_SETCHECK, BST_CHECKED if want_checked else BST_UNCHECKED, 0)
-    time.sleep(0.3)
-    user32.PostMessageW(btn, BM_CLICK, 0, 0)
-    time.sleep(2.5)  # schtasks 走进程，给足时间
-    st = state()
-    status_text = wtext(lbl)
-    p("\n=== %s ===" % label)
-    p("  勾选状态  : %s" % ("已勾选" if user32.SendMessageW(chk, BM_GETCHECK) else "未勾选"))
-    p("  计划任务  : %s" % (st["task"] or "(无)"))
-    p("  注册表Run : %s" % (st["run"] or "(无)"))
-    p("  auto_start: %s" % st["cfg_auto_start"])
-    p("  状态栏    : %r" % status_text)
-
-    if want_checked:
-        ok = (st["task"] != "" and st["run"] == ""
-              and st["cfg_auto_start"] is True)
-        p("  => %s（要求：有任务、无 Run 项、auto_start=true）" % ("通过" if ok else "不通过"))
-    else:
-        ok = (st["task"] == "" and st["run"] == ""
-              and st["cfg_auto_start"] is False)
-        p("  => %s（要求：任务与 Run 项都清空、auto_start=false）" % ("通过" if ok else "不通过"))
-    results.append((label, ok))
-    return st
-
-
-# 先关：验证「关闭」把两种机制都清掉
-do("第 1 步：取消勾选并保存", False)
-# 再开：验证需要提权时走计划任务、且不重复写 Run 项
-do("第 2 步：重新勾选并保存", True)
-
-p("\n" + "=" * 62)
-p("总结")
-p("=" * 62)
-for label, ok in results:
-    p("  %-28s %s" % (label, "PASS" if ok else "FAIL"))
-p("  最终状态: %s" % state())
-sys.exit(0 if all(ok for _l, ok in results) else 1)
+# 这一行不是形式主义：本脚本会真的去开关用户的开机自启。
+# 早先没有这个保护，别的脚本一句 `import _autostart_ui_test` 就把整个测试重跑了一遍，
+# 用户的设置被无声地改了两轮。**任何会被 import 的脚本，副作用都必须关在 main 里。**
+if __name__ == "__main__":
+    sys.exit(main())

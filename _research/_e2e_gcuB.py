@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _gcu_state
 import _pub_test
 
-LOG = os.path.join(os.environ["APPDATA"], "MechrevoMode", "log.txt")
+from _paths import LOG  # 数据目录见 _paths.py（程序同目录\data）
 
 
 def log_size():

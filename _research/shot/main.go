@@ -14,23 +14,23 @@ import (
 )
 
 var (
-	user32   = syscall.NewLazyDLL("user32.dll")
-	gdi32    = syscall.NewLazyDLL("gdi32.dll")
-	pFind    = user32.NewProc("FindWindowW")
-	pSetFg   = user32.NewProc("SetForegroundWindow")
-	pGetRect = user32.NewProc("GetWindowRect")
-	pGetDC   = user32.NewProc("GetDC")
-	pRelDC   = user32.NewProc("ReleaseDC")
-	pPrintW  = user32.NewProc("PrintWindow")
-	pShowW   = user32.NewProc("ShowWindow")
+	user32    = syscall.NewLazyDLL("user32.dll")
+	gdi32     = syscall.NewLazyDLL("gdi32.dll")
+	pFind     = user32.NewProc("FindWindowW")
+	pSetFg    = user32.NewProc("SetForegroundWindow")
+	pGetRect  = user32.NewProc("GetWindowRect")
+	pGetDC    = user32.NewProc("GetDC")
+	pRelDC    = user32.NewProc("ReleaseDC")
+	pPrintW   = user32.NewProc("PrintWindow")
+	pShowW    = user32.NewProc("ShowWindow")
 	pDpiAware = user32.NewProc("SetProcessDPIAware")
 
-	pCreateCompatDC   = gdi32.NewProc("CreateCompatibleDC")
-	pCreateCompatBmp  = gdi32.NewProc("CreateCompatibleBitmap")
-	pSelectObject     = gdi32.NewProc("SelectObject")
-	pGetDIBits        = gdi32.NewProc("GetDIBits")
-	pDeleteDC         = gdi32.NewProc("DeleteDC")
-	pDeleteObject     = gdi32.NewProc("DeleteObject")
+	pCreateCompatDC  = gdi32.NewProc("CreateCompatibleDC")
+	pCreateCompatBmp = gdi32.NewProc("CreateCompatibleBitmap")
+	pSelectObject    = gdi32.NewProc("SelectObject")
+	pGetDIBits       = gdi32.NewProc("GetDIBits")
+	pDeleteDC        = gdi32.NewProc("DeleteDC")
+	pDeleteObject    = gdi32.NewProc("DeleteObject")
 )
 
 type rect struct{ Left, Top, Right, Bottom int32 }
@@ -173,4 +173,5 @@ func main() {
 		fmt.Println("encode failed:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("saved %s (%dx%d)\n", out, w, h)}
+	fmt.Printf("saved %s (%dx%d)\n", out, w, h)
+}

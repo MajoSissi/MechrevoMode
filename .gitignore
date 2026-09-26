@@ -32,3 +32,12 @@ go.work.sum
 # .vscode/
 /.workbuddy
 /*.exe
+
+# 运行期数据目录（配置、日志、图标自检图），跟 exe 同级
+/data/
+
+# 图标自检输出（旧位置，已迁到 data/icons/）
+/icons_sheet.png
+
+# Python 探测脚本的字节码缓存
+__pycache__/

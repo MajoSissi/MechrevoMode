@@ -159,6 +159,7 @@ const (
 	wmDestroy     = 0x0002
 	wmClose       = 0x0010
 	wmCommand     = 0x0111
+	wmTimer       = 0x0113
 	wmNull        = 0x0000
 	wmRButtonUp   = 0x0205
 	wmLButtonUp   = 0x0202

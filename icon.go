@@ -68,66 +68,85 @@ func lookupGlyph(g rune) [7]uint8 {
 // 未连接 GCU 时的图标配色
 const colUnknown = 0x7F8C9A
 
-// cos30 = √3/2。正六边形的内切半径 = 外接半径 × cos30。
-const cos30 = 0.8660254037844386
+// 托盘图标 = 圆角正方形底色 + 中间一个白色字母。
 
-// insideHexagon 判断点 (dx, dy)（相对中心）是否落在尖角朝上（顶点在 12 点钟方向）
-// 的正六边形内，外接半径为 r。
+// cornerRatio 圆角半径占**半边长**的比例。0.45 → 圆角半径 = 边长的 22.5%，
+// 看上去是「带圆角的方块」，既不像直角方块那么硬，也没到胶囊或圆形。
+const cornerRatio = 0.45
+
+// roundedSquareDist 点到圆角正方形边界的距离：内部为正、外部为负。
 //
-// 顶点依次位于 -90°、-30°、30°、90°、150°、210°。
-// 六条边给出六个半平面约束，利用对称性可以化简成下面两个不等式：
+// 圆角正方形 = 正方形（|x|<=half 且 |y|<=half）∩ 四个角上的圆（半径 rc）。
+// 按对称性把点折到第一象限后只有两种情形：
+//   - 落在「十字」区域（|x| <= half-rc 或 |y| <= half-rc）：最近的是直边，
+//     距离 = half - max(|x|,|y|)；
+//   - 落在角上的那块方形区域：最近的是圆角圆弧，距离 = rc - hypot(越界量)。
 //
-//	|x| <= 内切半径                      （左右两条竖直边）
-//	0.5|x| + cos30*|y| <= 内切半径       （四条斜边）
-func insideHexagon(dx, dy, r float64) bool {
-	apothem := r * cos30
+// rc = 0 时退化为普通正方形（填充区在某些尺寸下就是这种情形）。
+// 用「有符号距离」而不是布尔判断，是因为字模留白和边缘抗锯齿都要用到这个数值。
+func roundedSquareDist(dx, dy, half, rc float64) float64 {
 	ax, ay := math.Abs(dx), math.Abs(dy)
-	return ax <= apothem && 0.5*ax+cos30*ay <= apothem
+	qx, qy := ax-(half-rc), ay-(half-rc)
+	if qx > 0 && qy > 0 {
+		return rc - math.Hypot(qx, qy)
+	}
+	return half - math.Max(ax, ay)
 }
 
-// glyphBoxInset 字模四周留给六边形轮廓的空白，占内切半径的比例。
+// iconSuperSample 底色超采样倍率。圆角与边缘都靠它做抗锯齿。
+const iconSuperSample = 4
+
+// shapeHalf 求超采样画布 hi×hi 上圆角正方形的半边长。
+//
+// 减掉 0.75 个超采样像素是给边缘抗锯齿留的余量：不留的话，抗锯齿只会把
+// 轮廓往里啃，图标看着会偏小一圈。
+func shapeHalf(hi int) float64 {
+	h := float64(hi)/2.0 - float64(iconSuperSample)*0.75
+	if h < 1 {
+		return 1
+	}
+	return h
+}
+
+// glyphBoxInset 字模四周留出的空白，占**形状半边长**的比例。
 //
 // 字母的直角本来就落在字模矩形的四角上（「E」上下两条横杠的两端就在那儿），
-// 而六边形的斜边正好从四角旁边掠过，不留空隙看着就像压在轮廓线上。
-const glyphBoxInset = 0.20
+// 不留空隙看着就像贴在图标边缘上。留太多字母又会显得小。
+// 0.30 → 字母高度约占图标高度的 68%（实测 16px 上是 6×9、24px 上 11×15）。
+const glyphBoxInset = 0.30
 
 // glyphBoxFor 求 5×7 点阵在图标上占用的整数矩形（宽 w、高 h）。
 //
 // 以前用「5×s 宽、7×s 高」的整数倍，s 只能取整数，于是每个尺寸要么把四角
-// 顶到六边形斜边上，要么一下子小一大截，没有中间状态。
-// 改成先按「四角离斜边留出 inset」解出目标高度，再按 5:7 取整；铺像素用最近邻，
+// 顶到边缘上，要么一下子小一大截，没有中间状态。
+// 改成先按「离边缘留出 inset」解出目标高度，再按 5:7 取整；铺像素用最近邻，
 // 每个点阵像素仍对应 1～2 个完整图标像素，笔画不会变半透明。
 //
-// 约束来自斜边：矩形四角 (w/2, h/2) 必须落在六边形内侧，
-//
-//	0.5*(w/2) + cos30*(h/2) <= apothem*(1-inset)
-func glyphBoxFor(apothem float64) (w, h int) {
-	limit := apothem * (1 - glyphBoxInset)
+// availHalf：形状半边长；rc：形状圆角半径，单位都是图标像素。
+// 除了四边不能越界，字模矩形的四角也不能戳出圆角 —— 所以四角要落在圆角内侧。
+func glyphBoxFor(availHalf, rc float64) (w, h int) {
+	limit := availHalf * (1 - glyphBoxInset)
+	fits := func(w, h int) bool {
+		ax, ay := float64(w)/2.0, float64(h)/2.0
+		if ax > availHalf || ay > availHalf {
+			return false
+		}
+		qx, qy := ax-(availHalf-rc), ay-(availHalf-rc)
+		if qx > 0 && qy > 0 {
+			return math.Hypot(qx, qy) <= rc
+		}
+		return true
+	}
 	for h = 48; h >= 7; h-- {
 		w = int(math.Round(float64(h) * 5.0 / 7.0))
 		if w < 5 {
 			w = 5
 		}
-		if 0.25*float64(w)+cos30*0.5*float64(h) <= limit {
+		if float64(h)/2.0 <= limit && fits(w, h) {
 			return w, h
 		}
 	}
 	return 5, 7
-}
-
-// iconSuperSample 底色超采样倍率。六边形边缘靠它做抗锯齿。
-const iconSuperSample = 4
-
-// hexagonRadius 求超采样画布 hi×hi 上六边形的外接半径。
-//
-// 减掉 0.75 个超采样像素是给边缘抗锯齿留的余量：不留的话，抗锯齿只会把
-// 轮廓往里啃，图标看着会偏小一圈。
-func hexagonRadius(hi int) float64 {
-	r := float64(hi)/2.0 - float64(iconSuperSample)*0.75
-	if r < 1 {
-		return 1
-	}
-	return r
 }
 
 // iconBitmap 生成 size×size 的 32bpp BGRA（直通 alpha）位图
@@ -137,25 +156,14 @@ func iconBitmap(size int, rgb uint32, glyph rune) []byte {
 
 	cx := float64(hi) / 2.0
 	cy := float64(hi) / 2.0
-	// 尖角朝上的六边形：高度 = 2r，宽度 = √3·r。高度占满图标，宽度自然收窄。
-	radius := hexagonRadius(hi)
-
-	// 底色掩码（高分辨率，用于边缘抗锯齿）
-	hexHi := make([]bool, hi*hi)
-	for y := 0; y < hi; y++ {
-		dy := float64(y) + 0.5 - cy
-		for x := 0; x < hi; x++ {
-			dx := float64(x) + 0.5 - cx
-			if insideHexagon(dx, dy, radius) {
-				hexHi[y*hi+x] = true
-			}
-		}
-	}
+	// 外形：圆角正方形（超采样坐标）
+	half := shapeHalf(hi)
+	rc := half * cornerRatio
 
 	// 字模：按最近邻铺到 gw×gh 的矩形上，纯白实心、不做半透明，
 	// 于是小图标上笔画依然是一根实心的白线，不会糊成灰绿。
 	fm := lookupGlyph(glyph)
-	gw, gh := glyphBoxFor(radius * cos30 / float64(ss))
+	gw, gh := glyphBoxFor(half/float64(ss), rc/float64(ss))
 	ox := (size - gw) / 2
 	oy := (size - gh) / 2
 	glyphOut := make([]bool, size*size)
@@ -181,9 +189,12 @@ func iconBitmap(size int, rgb uint32, glyph rune) []byte {
 		}
 	}
 
-	br := byte(rgb >> 16)
-	bg := byte(rgb >> 8)
-	bb := byte(rgb)
+	// 位图是 BGRA：out[0]=蓝、out[1]=绿、out[2]=红。
+	// rgb 是 0xRRGGBB，所以三个分量必须**倒着**写进去 ——
+	// 顺序写反的话红蓝互换，蓝色会显示成橙色、紫色会显示成粉色。
+	r8 := byte(rgb >> 16)
+	g8 := byte(rgb >> 8)
+	b8 := byte(rgb)
 
 	out := make([]byte, size*size*4)
 	for y := 0; y < size; y++ {
@@ -193,22 +204,24 @@ func iconBitmap(size int, rgb uint32, glyph rune) []byte {
 				out[o], out[o+1], out[o+2], out[o+3] = 255, 255, 255, 255
 				continue
 			}
-			var cov float64
+			// 数一遍有多少个子采样点落在图形里：颜色就是纯底色，
+			// alpha 取覆盖率。只按最大的那一份取色（而不是数覆盖率）的话，
+			// 圆角处会留下生硬的阶梯。
+			n := 0
 			for sy := 0; sy < ss; sy++ {
+				dy := float64(y*ss+sy) + 0.5 - cy
 				for sx := 0; sx < ss; sx++ {
-					if hexHi[(y*ss+sy)*hi+x*ss+sx] {
-						cov++
+					dx := float64(x*ss+sx) + 0.5 - cx
+					if roundedSquareDist(dx, dy, half, rc) > 0 {
+						n++
 					}
 				}
 			}
-			if cov <= 0 {
+			if n == 0 {
 				continue // 已是全透明
 			}
-			// 直通 alpha：颜色保持纯模式色，只让 alpha 递减
-			out[o] = bb
-			out[o+1] = bg
-			out[o+2] = br
-			out[o+3] = clampByte(cov / float64(ss*ss) * 255)
+			out[o], out[o+1], out[o+2] = b8, g8, r8
+			out[o+3] = clampByte(float64(n) / float64(ss*ss) * 255)
 		}
 	}
 	return out

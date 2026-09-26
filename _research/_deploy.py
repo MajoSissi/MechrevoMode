@@ -5,6 +5,8 @@
 # 2. 不能从本脚本直接启动被测程序 —— 它会挂在本脚本的进程树里，脚本一结束就被回收。
 #    用 schtasks /Run 让任务计划服务托管。
 # 3. schtasks /Change 不要用（本任务带 LogonTrigger + InteractiveToken，会卡住等凭据）。
+# 4. 日志路径是「程序同目录\data\log.txt」，不是 %APPDATA%。跟着旧路径读会一直等不到
+#    「启动完成」，看起来像部署失败，其实是读错文件了。
 import os
 import shutil
 import subprocess
@@ -17,7 +19,7 @@ import _pub_test
 SRC = r"D:\User\Desktop\MechrevoMode\MechrevoMode.exe"
 INSTALLED = r"D:\User\OneDrive\Programm\MechrevoMode\MechrevoMode.exe"
 TASK = "MechrevoMode"
-LOG = os.path.join(os.environ["APPDATA"], "MechrevoMode", "log.txt")
+LOG = os.path.join(os.path.dirname(INSTALLED), "data", "log.txt")
 
 
 def main():

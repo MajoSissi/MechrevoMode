@@ -45,6 +45,17 @@ const (
 	topicFanStat  = "Fan/Status"
 	topicTrayStat = "Tray/Status"
 
+	// 实时遥测。订阅 System/FanInfo 就能拿到两个风扇的转速 ——
+	// 不需要发任何「打开遥测」的动作，也**不要**用 "#" 通配：
+	// 通配会把 SupportInfo / Keyboard / HidLightbar 那些无关主题一起拉过来，
+	// 白白增加解析开销。
+	//
+	// 实测只有 CpuInfo / GpuInfo / FanInfo / MemoryInfo / NetworkInfo 会推数据，
+	// 其余三十来个主题（System/Control、System/BatteryInfo、Monitor/Status…）
+	// 订阅了也一条都不来。温度虽然 CpuInfo/GpuInfo 里有，但托盘提示用不上，
+	// 索性不订阅；GCU 则**任何主题都没有**功耗字段。
+	topicFanInfo = "System/FanInfo"
+
 	mqtt311 = 4
 
 	customSlotCount = 5
@@ -113,6 +124,15 @@ type GCU struct {
 	// 最近一次 Fan/Status 里的原始档位名，仅用于日志与排查
 	profName string
 
+	// 当前模式的功耗/温度墙，供托盘悬浮提示显示（见 formatLimits）
+	limits Limits
+
+	// 最近一次 System/FanInfo 的两个风扇转速，供托盘悬浮提示显示（见 FanRPM）
+	//
+	// 刻意**不用**回调通知 UI：托盘提示本来就有自己的重绘节拍，
+	// 走回调只会让每条遥测都多发一条窗口消息，得不偿失。
+	fan FanRPM
+
 	// 探测到的可用客户端序号，-1 表示无新发现（由 UI 线程取走并落盘）
 	discIdx int
 	// 首选客户端序号（启动时从配置读入一次）
@@ -139,12 +159,11 @@ type GCU struct {
 	lastMsgAt time.Time
 
 	// 后端自愈状态（见 ensureBackend）
-	autoBackend func() bool
-	backendAt   time.Time       // 上次尝试拉起后端的时间（节流用）
-	pubPID      uint32          // 本程序自己拉起的发布者 pid，0 = 没拉起
-	pubPath     string          // 上面那个发布者的路径
-	pubAt       time.Time       // 拉起时刻（用来判断它到底有没有起作用）
-	pubFailed   map[string]bool // 已判定不可用的发布者候选
+	backendAt time.Time       // 上次尝试拉起后端的时间（节流用）
+	pubPID    uint32          // 本程序自己拉起的发布者 pid，0 = 没拉起
+	pubPath   string          // 上面那个发布者的路径
+	pubAt     time.Time       // 拉起时刻（用来判断它到底有没有起作用）
+	pubFailed map[string]bool // 已判定不可用的发布者候选
 }
 
 func NewGCU(prefer int, onChange StateChange) *GCU {
@@ -159,11 +178,9 @@ func NewGCU(prefer int, onChange StateChange) *GCU {
 		profile:   -1,
 		index:     -1,
 		discIdx:   -1,
+		fan:       unknownFanRPM(),
 	}
 }
-
-// SetAutoBackendFn 注入「是否允许自动拉起 GCU 后端」的判断（读用户配置）
-func (g *GCU) SetAutoBackendFn(fn func() bool) { g.autoBackend = fn }
 
 // SetLogger 注入日志函数（可选）
 func (g *GCU) SetLogger(fn func(string, ...interface{})) { g.logFn = fn }
@@ -186,6 +203,20 @@ func (g *GCU) Snapshot() (mode, profile int, online bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.mode, g.profile, g.online
+}
+
+// Limits 供托盘悬浮提示显示的限制值快照（UI 线程调用）
+func (g *GCU) Limits() Limits {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.limits
+}
+
+// FanRPM 供托盘悬浮提示显示的风扇转速快照（UI 线程调用）
+func (g *GCU) FanRPM() FanRPM {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.fan
 }
 
 // Settling 是否处于「命令落定期」。落定期内状态回报还不可信，
@@ -253,6 +284,11 @@ func (g *GCU) setOnline(v bool) {
 	g.mu.Lock()
 	changed := g.online != v
 	g.online = v
+	if !v {
+		// 断线时把转速清空。这是「此刻的读数」，拿几十秒前的旧值继续显示
+		// 比显示 -- 更容易误导 —— 看着像风扇还在这转速上转。
+		g.fan = unknownFanRPM()
+	}
 	g.mu.Unlock()
 	if changed {
 		g.notify()
@@ -319,6 +355,10 @@ func (g *GCU) onConnected(c mqtt.Client) {
 	c.Subscribe(topicTrayStat, 0, func(_ mqtt.Client, m mqtt.Message) {
 		defer g.guard("handleTrayStatus")
 		g.handleTrayStatus(m.Payload())
+	})
+	c.Subscribe(topicFanInfo, 0, func(_ mqtt.Client, m mqtt.Message) {
+		defer g.guard("handleFanInfo")
+		g.handleFanInfo(m.Payload())
 	})
 	c.Publish(topicFanCtrl, 0, false, `{"Action":"GETSTATUS"}`)
 }
@@ -466,14 +506,6 @@ func (g *GCU) supervise() {
 }
 
 // ---------------------------------------------------------------- GCU 后端自愈
-
-// backendAllowed 读「自动拉起 GCU 服务」开关；未注入判断函数时视为允许
-func (g *GCU) backendAllowed() bool {
-	if g.autoBackend == nil {
-		return true
-	}
-	return g.autoBackend()
-}
 
 // touchMsg 记一条状态报文到达。同时清空发布者失败名单 ——
 // 既然已经有状态了，说明当前这份发布者是好的。
@@ -656,6 +688,8 @@ func startServiceAndWait(name string, wait time.Duration) (string, error) {
 //
 // 这里按需把两者补起来，就不再依赖用户先去开控制台。
 // 整个函数按 backendRetryInterval 节流；reapPublisher 只结束本程序自己启动的进程。
+//
+// 这件事没有做成用户开关：不拉起后端工具就是个摆设，做成可关的选项只会让人误关。
 func (g *GCU) ensureBackend(reason string) {
 	g.mu.Lock()
 	if time.Since(g.backendAt) < backendRetryInterval {
@@ -665,9 +699,6 @@ func (g *GCU) ensureBackend(reason string) {
 	g.backendAt = time.Now()
 	g.mu.Unlock()
 
-	if !g.backendAllowed() {
-		return
-	}
 	if !isElevated() {
 		g.logf("GCU 未就绪（%s），但本程序不是管理员，无法自动拉起 GCU 服务；"+
 			"可在设置里勾选「以管理员身份运行」", reason)
@@ -721,6 +752,196 @@ type fanStatusPayload struct {
 	OfficeProfileIndex string `json:"OfficeProfileIndex"`
 	TurboProfileIndex  string `json:"TurboProfileIndex"`
 	CustomProfileIndex string `json:"CustomProfileIndex"`
+
+	// 功耗/温度墙
+	//
+	// 这里有两套 CPU 功耗字段，选错就显示错数据，依据是 `_limits_probe.py` 的实测对比：
+	// 逐模式切过去时 `CPU_AmdSPL/SPPT/FPPT` 五个模式各不相同，而 `CPU_PL1/PL2/PL4`
+	// 在自定义模式下**不随 ProfileIndex 变**、一直是上一个模式的残留值 —— 所以 AMD
+	// 平台必须取 Amd* 那套，PL* 只作兜底。
+	CPUAmdSPL  string `json:"CPU_AmdSPL"`  // 持续功耗（相当于 STAPM Limit）
+	CPUAmdSPPT string `json:"CPU_AmdSPPT"` // 慢包络（Slow PPT）
+	CPUAmdFPPT string `json:"CPU_AmdFPPT"` // 快包络（Fast PPT）
+	CPUPL1     string `json:"CPU_PL1"`     // 兜底：非 AMD 平台的三档功耗
+	CPUPL2     string `json:"CPU_PL2"`
+	CPUPL4     string `json:"CPU_PL4"`
+	TjMax      string `json:"TjMax"` // CPU 温度墙（硬件上限，不随模式变）
+	// CPU_AmdTccTarget 是厂商设定的目标温度，但**只有开关打开时才生效**：
+	// 实测自定义档 Switch=1 / AmdTccTarget=85（与官方控制台显示的一致），
+	// 而开关没开时这个字段不可信 —— 系统狂暴档会给 7 这种脏值。
+	CPUAmdTccTarget string   `json:"CPU_AmdTccTarget"`
+	CPUTccSwitch    gcuValue `json:"CPU_TccOffsetSwitch"`
+
+	GPUTargetTemp string `json:"GPU_TargetTemperature"`     // GPU 温度墙
+	GPUTGP        string `json:"GPU_ConfigurableTGPTarget"` // GPU 功耗目标
+	GPUBoost      string `json:"GPU_DynamicBoost"`          // Dynamic Boost 附加功耗
+	// Dynamic Boost 的**开关**。只看 GPU_DynamicBoost 那个值会算错：
+	// 实测本机五个模式的 DynamicBoostSwitch 全是 0，而 DynamicBoost 字段却带着
+	// 5 / 25 的值 —— 那是厂商预设的候选值，不是当前真实生效的附加功耗。
+	GPUBoostSwitch gcuValue `json:"GPU_DynamicBoostSwitch"`
+}
+
+// gcuValue 接收 GCU 报文字段。
+//
+// 本机同一条 Fan/Status 里写法就**不统一**：`IsAC` / `OcSupport` / `IsAMDPlatform`
+// 是 JSON 布尔，而 `TjMax` / `GPU_DynamicBoostSwitch` 是字符串。
+// 用 string 去接的话，厂商哪天把某个字段改成布尔或数字，json.Unmarshal 会让
+// **整条报文解析失败** —— 不是只丢这一个字段，而是连 OperatingMode / ProfileIndex
+// 都拿不到，症状会很离谱（模式永远不更新，却看不出任何报错）。
+// 所以这里自己反序列化，字符串 / 数字 / 布尔 / null 都吃得下。
+type gcuValue string
+
+func (v *gcuValue) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	s = strings.Trim(s, `"`)
+	switch strings.ToLower(s) {
+	case "true":
+		*v = "1"
+	case "false", "null", "":
+		*v = "0"
+	default:
+		*v = gcuValue(s)
+	}
+	return nil
+}
+
+// Limits 当前模式的温度 / 功耗，按显示顺序排成两行：
+//
+//	CPU 🌡85℃ ⚡38/38/45W
+//	GPU 🌡87℃ ⚡50W
+//
+// 某一行为空表示该侧取不到数据，UI 应当整行跳过 —— 宁缺毋滥，不要显示半个信息。
+// 某一项单独缺失时只保留拿得到的那部分，不会残留孤零零的图标（见 joinFields）。
+type Limits struct {
+	CPU string
+	GPU string
+}
+
+// Rows 按显示顺序返回非空的行
+func (l Limits) Rows() []string {
+	var out []string
+	for _, s := range []string{l.CPU, l.GPU} {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Has 是否至少有一侧拿到了数据
+func (l Limits) Has() bool { return len(l.Rows()) > 0 }
+
+// joinFields 把同一侧（CPU 或 GPU）拿到的几项拼成一行。
+//
+// 每一项**自带前导图标**，之间只用一个空格分开 —— 没有 "-" 分隔符了：
+//
+//	CPU 🌡85℃ ⚡38/38/45W
+//
+// 图标本身就把每一项划得很清楚，再加划线纯属噪音（用户点名要去掉）。
+//
+// 空项直接跳过：整行都空就返回空串（由 Rows 整行跳过），只剩一项时也不会留下
+// 一个孤零零的图标（那种「CPU 🌡85℃ ⚡」比少显示一项更难看）。
+func joinFields(label string, fields ...string) string {
+	kept := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f != "" {
+			kept = append(kept, f)
+		}
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	return label + " " + strings.Join(kept, " ")
+}
+
+// joinWatts 把三个功耗档位拼成 "45/45/56W"（不含图标，图标由调用方加）。
+//
+// 三个位置固定对应「持续 / 慢包络 / 快包络」，所以缺哪一个都要留一个 "-" 占位 ——
+// 直接砍掉的话，剩下的两个会被读成别的档位。
+//
+// 注意这里的 "-" 是**档位占位符**，不是字段之间的分隔符（分隔符已经取消了）。
+// 位置语义靠它维持，所以保留。
+func joinWatts(sustained, slow, fast int) string {
+	if sustained <= 0 && slow <= 0 && fast <= 0 {
+		return ""
+	}
+	f := func(v int) string {
+		if v <= 0 {
+			return "-"
+		}
+		return strconv.Itoa(v)
+	}
+	return f(sustained) + "/" + f(slow) + "/" + f(fast) + "W"
+}
+
+// switchOn 判断 GCU 的开关字段是否打开（报文里是 "0"/"1" 字符串）
+func switchOn(v string) bool { return atoiOr(v, 0) != 0 }
+
+// CPU 温度墙的合理区间。超出就当成厂商没填好的脏值，回退到 TjMax ——
+// 实测系统狂暴档给过 7，直接显示会非常离谱。
+const (
+	minTempWall = 60
+	maxTempWall = 115
+)
+
+// formatLimits 从 Fan/Status 报文里提取当前模式的限制值。
+//
+// 单位依实测推断：`SPL/FPPT/TGP` 是瓦(W)，`TjMax`/`TargetTemperature` 是摄氏度(℃)。
+// 依据：本机五个模式的值分别为 45/75/210/38/50(W) 与 95/87(℃)，数量级与业界惯例吻合，
+// 且 GPU_TargetTemperature 的 Minimum=75 / Maximum=87 是明确的温度语义。
+//
+// 每一项都自带前导图标（🌡 温度 / ⚡ 功耗），拼行时只剩空格，见 joinFields。
+func formatLimits(p fanStatusPayload) Limits {
+	var (
+		l       Limits
+		cpuTemp string
+		cpuWatt string
+		gpuTemp string
+		gpuWatt string
+	)
+
+	// CPU 温度墙。不是 TjMax 一路到底：CPU_TccOffsetSwitch 打开时，厂商设定的目标温度
+	// （CPU_AmdTccTarget）才是当前模式的温度墙。开关没开时该字段不可信，用 TjMax。
+	// 再叠一道合理区间校验，万一厂商给了离谱的值也不会显示出来。
+	t := atoiOr(p.TjMax, -1)
+	if switchOn(string(p.CPUTccSwitch)) {
+		if v := atoiOr(p.CPUAmdTccTarget, -1); v >= minTempWall && v <= maxTempWall {
+			t = v
+		}
+	}
+	if t > 0 {
+		cpuTemp = iconTemp + strconv.Itoa(t) + unitTemp
+	}
+
+	// CPU 三个功耗档位。实测只有 AMD 那套随模式变，PL1/PL2/PL4 在本机是残留值，
+	// 所以 AMD 三档缺一个都算「没给」，整组退回 Intel 风格。
+	sustained, slow, fast := atoiOr(p.CPUAmdSPL, -1), atoiOr(p.CPUAmdSPPT, -1), atoiOr(p.CPUAmdFPPT, -1)
+	if sustained < 0 && slow < 0 && fast < 0 {
+		sustained, slow, fast = atoiOr(p.CPUPL1, -1), atoiOr(p.CPUPL2, -1), atoiOr(p.CPUPL4, -1)
+	}
+	// 图标必须跟着 joinWatts 的**空串**一起消失，否则会留下一个孤零零的 ⚡
+	if w := joinWatts(sustained, slow, fast); w != "" {
+		cpuWatt = iconWatt + w
+	}
+
+	// GPU 温度墙
+	if v := atoiOr(p.GPUTargetTemp, -1); v > 0 {
+		gpuTemp = iconTemp + strconv.Itoa(v) + unitTemp
+	}
+
+	// GPU 功耗。Dynamic Boost 是**可选**的附加功耗，必须开关真的打开才算进总数：
+	// 只判断 boost > 0 会凭空多出一截（本机五个模式开关全是 0，却都带着值）。
+	if tgp := atoiOr(p.GPUTGP, -1); tgp > 0 {
+		if boost := atoiOr(p.GPUBoost, -1); boost > 0 && switchOn(string(p.GPUBoostSwitch)) {
+			gpuWatt = iconWatt + fmt.Sprintf("%d+%dW", tgp, boost)
+		} else {
+			gpuWatt = iconWatt + fmt.Sprintf("%dW", tgp)
+		}
+	}
+
+	l.CPU = joinFields("CPU", cpuTemp, cpuWatt)
+	l.GPU = joinFields("GPU", gpuTemp, gpuWatt)
+	return l
 }
 
 func atoiOr(s string, def int) int {
@@ -825,6 +1046,16 @@ func (g *GCU) handleFanStatus(payload []byte) {
 		return
 	}
 	g.touchMsg()
+	g.mu.Lock()
+	prev := g.limits
+	g.limits = formatLimits(p)
+	fresh := g.limits != prev
+	g.mu.Unlock()
+	// 限制值只有这条报文带着，而它并非总伴随模式变化（同模式重连、在官方控制台里
+	// 微调功耗都会只更新这里），所以单独判一次「变没变」，变了就让 UI 线程重刷托盘提示。
+	if fresh {
+		g.notify()
+	}
 	mode := atoiOr(p.OperatingMode, -1)
 	if mode < 0 {
 		return
@@ -841,6 +1072,77 @@ func (g *GCU) handleFanStatus(payload []byte) {
 		profile = atoiOr(p.CustomProfileIndex, 0)
 	}
 	g.applyStatus(mode, profile, p.ProfileName)
+}
+
+// ---------------------------------------------------------------- 实时遥测
+
+// gcuNum 接收遥测报文里的数值字段。
+//
+// GCU 在这一块的写法**完全不统一** —— 同一条 System/CpuInfo 里 CpuTemperature 是字符串
+// "61"，而 System/FanInfo 里 CpuFanRpm 是原生数字 2990。用 string 接会让整条报文解析
+// 失败，用 int 接又会把字符串那条整个丢掉，所以两种都得吃。
+type gcuNum int
+
+func (n *gcuNum) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
+	if s == "" || s == "null" {
+		*n = 0
+		return nil
+	}
+	if v, err := strconv.Atoi(s); err == nil {
+		*n = gcuNum(v)
+		return nil
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		*n = gcuNum(int(f + 0.5))
+		return nil
+	}
+	*n = 0
+	return nil
+}
+
+// fanInfoPayload 对应 System/FanInfo 的原始报文：
+//
+//	{"CpuFanDuty":55,"GpuFanDuty":55,"CpuFanRpm":2990,"GpuFanRpm":2854}
+//
+// Duty（占空比）我们用不上，但列在这里，改天要看风扇曲线时不用再去翻抓包。
+// 两个 Rpm 用**指针**接：JSON 里没有这个字段时是 nil，能真正区分「没上报」
+// 和「上报了 0」—— 风扇停转时 0 是合法读数，不能当缺失处理。
+type fanInfoPayload struct {
+	CpuFanDuty gcuNum  `json:"CpuFanDuty"`
+	GpuFanDuty gcuNum  `json:"GpuFanDuty"`
+	CpuFanRpm  *gcuNum `json:"CpuFanRpm"`
+	GpuFanRpm  *gcuNum `json:"GpuFanRpm"`
+}
+
+// saneRpm 把报文里的一项转速折算成可显示的值：
+// 字段缺失（nil）或数值超出合理上界都返回 unknownValue。
+func saneRpm(v *gcuNum) int {
+	if v == nil {
+		return unknownValue
+	}
+	n := int(*v)
+	if n < 0 || n > maxSaneRpm {
+		return unknownValue
+	}
+	return n
+}
+
+// handleFanInfo System/FanInfo：两个风扇的转速。
+//
+// 这是**唯一**能拿到笔记本风扇转速的地方：NVML 在笔记本上不支持风扇
+// （GetNumFans=0 / GetFanSpeed NOT_SUPPORTED），GCU 自己也是读 EC 得来的
+// （GetEcCpuFanRpm / GetEcGpuFanRpm）。
+func (g *GCU) handleFanInfo(payload []byte) {
+	var p fanInfoPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return
+	}
+	g.touchMsg()
+	next := FanRPM{CPU: saneRpm(p.CpuFanRpm), GPU: saneRpm(p.GpuFanRpm)}
+	g.mu.Lock()
+	g.fan = next
+	g.mu.Unlock()
 }
 
 // ---------------------------------------------------------------- 下发命令

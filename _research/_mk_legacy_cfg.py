@@ -1,6 +1,8 @@
 import json, os, shutil, datetime
 
-d = os.path.join(os.environ['APPDATA'], 'MechrevoMode')
+from _paths import LEGACY  # 这个脚本就是专门写「旧位置」来测迁移的，用 LEGACY 而不是 DATA
+
+d = LEGACY
 p = os.path.join(d, 'config.json')
 if os.path.exists(p):
     shutil.copy2(p, p + '.bak')

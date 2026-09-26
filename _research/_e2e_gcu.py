@@ -19,7 +19,7 @@ import _gcu_state
 import _pub_test
 
 EXE = r"D:\User\Desktop\MechrevoMode\MechrevoMode.exe"
-LOG = os.path.join(os.environ["APPDATA"], "MechrevoMode", "log.txt")
+from _paths import LOG  # 数据目录见 _paths.py（程序同目录\data）
 
 
 def log_size():

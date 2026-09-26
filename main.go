@@ -26,12 +26,18 @@ const (
 	wmBalloon      = wmApp + 3
 	wmProbe        = wmApp + 4 // 自检：wparam = 要切换的档位下标
 	wmRunDone      = wmApp + 5 // 手动运行命令结束：wparam != 0 表示成功
+	wmTipTick      = wmApp + 6 // 托盘提示重绘定时器
 
 	trayUID = 1
 
 	// 托盘菜单项 ID：1000 + 档位下标
 	idModeBase = 1000
 	idModeMax  = idModeBase + 128
+
+	// 托盘提示的重绘节拍。GCU 固定每 2 秒推一条 System/FanInfo，节拍跟它对齐 ——
+	// 比它快只是把同一个数值重新拼一遍，比它慢就会丢掉中间那次的显示。
+	// 重绘本身很便宜（把缓存好的几个数拼成字符串），而且只有文本真变了才发 NIM_MODIFY。
+	tipTimerTick = 2000 // 毫秒
 )
 
 type App struct {
@@ -45,6 +51,9 @@ type App struct {
 	trayAdded bool
 	menuOpen  bool
 	quitting  bool
+	tipText   string // 上次写进托盘提示的文本，变化时才记日志，避免刷屏
+	tipStop   chan struct{}
+	tipWG     sync.WaitGroup
 	logFile   *os.File
 
 	pendMu   sync.Mutex
@@ -78,13 +87,7 @@ func (a *App) recoverLog(where string) {
 }
 
 func openLog() *os.File {
-	base, err := os.UserConfigDir()
-	if err != nil || base == "" {
-		base = os.Getenv("APPDATA")
-	}
-	dir := filepath.Join(base, "MechrevoMode")
-	_ = os.MkdirAll(dir, 0o755)
-	p := filepath.Join(dir, "log.txt")
+	p := filepath.Join(dataDir(), "log.txt")
 	logPath = p
 	if fi, err := os.Stat(p); err == nil && fi.Size() > 512*1024 {
 		_ = os.Remove(p)
@@ -180,7 +183,7 @@ func argValue(name string) string {
 
 // dumpPlans 自检：把电源方案枚举结果与一次「切到当前方案」的往返结果写入文件
 func dumpPlans() {
-	f, err := os.Create(filepath.Join(configDir(), "plans.txt"))
+	f, err := os.Create(filepath.Join(dataDir(), "plans.txt"))
 	if err != nil {
 		return
 	}
@@ -196,7 +199,7 @@ func dumpPlans() {
 
 // testPlans 自检：逐个尝试切换内置电源方案，最后还原原来的方案
 func testPlans() {
-	f, err := os.Create(filepath.Join(configDir(), "plans_test.txt"))
+	f, err := os.Create(filepath.Join(dataDir(), "plans_test.txt"))
 	if err != nil {
 		return
 	}
@@ -220,9 +223,9 @@ func testPlans() {
 }
 
 // testElevate 自检：往兼容性标志里写入 / 读回 / 清除 RUNASADMIN。
-// 结果写到 %APPDATA%\MechrevoMode\elevate_test.txt，便于和注册表编辑器对照。
+// 结果写到 数据目录\elevate_test.txt，便于和注册表编辑器对照。
 func testElevate(on bool) {
-	f, err := os.Create(filepath.Join(configDir(), "elevate_test.txt"))
+	f, err := os.Create(filepath.Join(dataDir(), "elevate_test.txt"))
 	if err != nil {
 		return
 	}
@@ -251,7 +254,7 @@ func testElevate(on bool) {
 // Win32 结构体字段错位是静默失效（不报错、只是永远查不到东西），
 // 尺寸对不上基本就能一眼看出。
 func dumpGCU() {
-	f, err := os.Create(filepath.Join(configDir(), "gcu.txt"))
+	f, err := os.Create(filepath.Join(dataDir(), "gcu.txt"))
 	if err != nil {
 		return
 	}
@@ -287,7 +290,7 @@ func dumpGCU() {
 // 我们还没来得及出手它就自己回来了。可代码没被执行过就等于没验证过，
 // 所以留一个入口，可以指定任意 exe 单独把这条路径跑一遍。
 func testGCULaunch(target string) {
-	f, err := os.Create(filepath.Join(configDir(), "gcu_launch.txt"))
+	f, err := os.Create(filepath.Join(dataDir(), "gcu_launch.txt"))
 	if err != nil {
 		return
 	}
@@ -348,16 +351,33 @@ func (a *App) current() (int, bool) {
 	return a.cfg.indexForModeSlot(mode, profile), true
 }
 
-// tooltip 光标停在托盘图标上时显示的文字：只报当前模式名
+// tooltip 光标停在托盘图标上时显示的文字，最多四行：
+//
+//	CPU - 85°C - 38/38/45W      ← 当前模式的温度墙 / 功耗墙（见 formatLimits）
+//	GPU - 87°C - 50W
+//	CPU 2990 RPM                ← 两个风扇的实时转速（见 FanRPM）
+//	GPU 2854 RPM
+//
+// 后两行紧接在限制信息下面，中间**不**加分隔线 —— 四行本来就是同一组读数，
+// 划线反而把它切成了两块不相干的东西。转速 2 秒重绘一次，跟随 GCU 的推送节拍。
+//
+// 两个降级分支：
+//   - 限制信息还没到但转速到了 → 只显示转速那两行（真读数不该被藏起来）
+//   - 两边都没有              → 退回老行为（模式名 / 未连接），免得只显示一行 --
 func (a *App) tooltip() string {
-	idx, online := a.current()
-	if !online {
-		return "未连接"
+	rows := a.gcu.Limits().Rows()
+	fan := a.gcu.FanRPM()
+	if len(rows) == 0 && fan.IsUnknown() {
+		idx, online := a.current()
+		if !online {
+			return "未连接"
+		}
+		if idx < 0 {
+			return "机械革命模式"
+		}
+		return a.cfg.Items[idx].Name
 	}
-	if idx < 0 {
-		return "机械革命模式"
-	}
-	return a.cfg.Items[idx].Name
+	return composeTip(rows, fan)
 }
 
 func fillUTF16(dst []uint16, s string) {
@@ -377,6 +397,85 @@ func fillUTF16(dst []uint16, s string) {
 
 func setTip(nid *notifyIconData, s string) {
 	fillUTF16(nid.Tip[:], s)
+}
+
+// applyTip 把当前提示文本写进 nid，返回「文本是否变了」。
+//
+// 提示文本本身无法从外部直接读回（它归 Explorer 的提示窗口所有），所以内容变化时
+// 在这里落一条日志 —— 排查「悬浮提示为什么不更新」时全靠它。
+//
+// 刻意**不**在这里发 NIM_MODIFY：调用方只是顺手把文本同步到 nid 上（syncTray 与
+// addTrayIcon 后面自己就跟着一次 Shell_NotifyIcon），多发一次修改通知没有意义。
+func (a *App) applyTip() bool {
+	s := a.tooltip()
+	setTip(&a.nid, s)
+	if s == a.tipText {
+		return false
+	}
+	a.tipText = s
+	a.logf("托盘提示 -> %q", s)
+	return true
+}
+
+// refreshTip 节拍到了就调一次：重算提示文本，**只有变了才**通知 Shell。
+//
+// 为什么不无条件发 NIM_MODIFY：转速是 2 秒才更新一次的整数，绝大多数拍上文本
+// 根本没变，白发一次修改通知只会让提示窗口闪。
+func (a *App) refreshTip() {
+	if !a.trayAdded {
+		return
+	}
+	if !a.applyTip() {
+		return
+	}
+	a.nid.Flags = nifMessage | nifIcon | nifTip
+	pShellNotifyIconW.Call(nimModify, uintptr(unsafe.Pointer(&a.nid)))
+}
+
+// startTipTimer 起一个 2 秒的节拍，用**自己投递的窗口消息**驱动重绘。
+//
+// 一开始用的是 SetTimer + WM_TIMER，本机实测那条路根本走不通：SetTimer 返回成功、
+// 程序也照常运行，但窗口过程一次都没收到 WM_TIMER（日志里一条 [tip] 都没有），
+// 而同样写法的 wmStateChanged 却一直是好的。与其去猜 WM_TIMER 在什么条件下会被
+// 系统饿死，不如改成后台 goroutine 定时 PostMessage —— 走一条确定通的路。
+//
+// 窗口销毁后 PostMessage 会失败，但那时进程本来就要退出了；用 tipStop 收尾即可。
+func (a *App) startTipTimer() {
+	if a.hwnd == 0 {
+		return
+	}
+	a.tipStop = make(chan struct{})
+	a.tipWG.Add(1)
+	go func() {
+		defer a.tipWG.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				a.logf("!! PANIC @tipTimer: %v\r\n%s", r, debug.Stack())
+			}
+		}()
+		t := time.NewTicker(tipTimerTick * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-a.tipStop:
+				return
+			case <-t.C:
+				if h := a.hwnd; h != 0 {
+					pPostMessageW.Call(h, wmTipTick, 0, 0)
+				}
+			}
+		}
+	}()
+	a.logf("托盘提示节拍已启动（%d 毫秒，PostMessage 驱动）", tipTimerTick)
+}
+
+func (a *App) stopTipTimer() {
+	if a.tipStop == nil {
+		return
+	}
+	close(a.tipStop)
+	a.tipStop = nil
+	a.tipWG.Wait()
 }
 
 // balloon 弹一个气泡提示
@@ -467,7 +566,7 @@ func (a *App) syncTray() {
 	}
 	a.nid.HIcon = a.icon
 	a.nid.Flags = nifMessage | nifIcon | nifTip
-	setTip(&a.nid, a.tooltip())
+	a.applyTip()
 	pShellNotifyIconW.Call(nimModify, uintptr(unsafe.Pointer(&a.nid)))
 	destroyIcon(old)
 }
@@ -488,7 +587,7 @@ func (a *App) addTrayIcon() {
 	}
 	a.iconKey = -9999
 	a.nid.HIcon = a.icon
-	setTip(&a.nid, a.tooltip())
+	a.applyTip()
 
 	if r, _, err := pShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&a.nid))); r == 0 {
 		a.logf("Shell_NotifyIcon(NIM_ADD) 失败: %v", err)
@@ -544,7 +643,7 @@ func appendItem(hMenu uintptr, flags uintptr, id int, text string) {
 	pAppendMenuW.Call(hMenu, flags, uintptr(id), uintptr(unsafe.Pointer(utf16FromString(text))))
 }
 
-// showTrayMenu 托盘右键菜单：只列模式切换项
+// showTrayMenu 托盘菜单：只列模式切换项，右键弹出
 func (a *App) showTrayMenu() {
 	if a.menuOpen {
 		return
@@ -559,6 +658,7 @@ func (a *App) showTrayMenu() {
 	hMenu, _, _ := pCreatePopupMenu.Call()
 	defer pDestroyMenu.Call(hMenu)
 
+	// 温度墙 / 功耗墙不放这里，改由悬浮提示（tooltip）显示，菜单只留切换动作。
 	tray := a.cfg.trayItems()
 	if len(tray) == 0 {
 		appendItem(hMenu, mfString|mfGrayed|mfDisabled, 0, "（没有勾选任何托盘模式）")
@@ -787,6 +887,12 @@ func (a *App) wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 			a.showTrayMenu()
 			return 0
 		case wmLButtonUp, wmLButtonDbl:
+			// 左键 = 打开设置界面（单击即可，双击也当单击处理）。
+			//
+			// 曾经试过「左键单击弹菜单 + 双击打开界面」：因为系统在判定双击之前必然
+			// 先发一次 WM_LBUTTONUP，单击动作必须挂一个 GetDoubleClickTime() 长的
+			// 定时器把它延后，否则每次双击都会先弹一次菜单。代价是单击要等满
+			// 500ms 才出菜单，实测迟钝得很，所以放弃了 —— 别再往这个方向改。
 			a.showSettings()
 			return 0
 		}
@@ -804,6 +910,9 @@ func (a *App) wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 		a.flushBalloon()
 		return 0
 
+	case wmTipTick:
+		a.refreshTip()
+		return 0
 	case wmProbe:
 		a.switchToItem(int(wparam))
 		return 0
@@ -834,6 +943,7 @@ func (a *App) wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 
 	case wmDestroy:
 		a.removeTrayIcon()
+		a.stopTipTimer()
 		pPostQuitMessage.Call(0)
 		return 0
 	}
@@ -957,8 +1067,11 @@ func main() {
 	// 这样「开机自启到底有没有被拉起来」「是以什么权限起来的」可以直接从日志判断，
 	// 不必再靠猜（之前排查登录自启失败时就吃过没有这条记录的亏）。
 	app.logf("启动 提权=%v 参数=%q 路径=%s", isElevated(), os.Args[1:], exePath())
+	// 数据目录的选择也留个痕：程序目录不可写时会静默退回 %APPDATA%，
+	// 不报出来的话「配置到底存哪了」只能靠猜。
+	app.logf("数据目录 %s（%s）", dataDir(), dataDirNote())
 
-	// 自检：导出电源计划枚举结果到 %APPDATA%\MechrevoMode\plans.txt
+	// 自检：导出电源计划枚举结果到 数据目录\plans.txt
 	if hasArg("-dump-plans") {
 		dumpPlans()
 		return
@@ -1000,6 +1113,10 @@ func main() {
 
 	// 让 GetSystemMetrics(SM_CXSMICON) 返回按 DPI 缩放后的真实尺寸
 	pSetProcessDPIAware.Call()
+
+	// 必须在下面 stat 配置、loadConfig 之前跑：否则升级后第一次启动会因为
+	// 新位置没有配置而当成全新安装，直接用默认值把用户的设置盖过去。
+	migrateLegacyConfig()
 
 	firstRun := false
 	if _, err := os.Stat(configPath()); err != nil {
@@ -1075,8 +1192,6 @@ func main() {
 		}
 	})
 	app.gcu.SetLogger(app.logf)
-	// 「自动拉起 GCU 服务」开关由后台线程按需读取（配置可能随时被界面改掉）
-	app.gcu.SetAutoBackendFn(app.cfg.AutoGCUEnabled)
 
 	if !app.createWindow() {
 		messageBox("机械革命模式", "创建窗口失败，详见日志。")
@@ -1092,14 +1207,15 @@ func main() {
 	app.addTrayIcon()
 	app.syncTray()
 	app.gcu.Start()
+	app.startTipTimer()
 
 	// 启动时不做任何模式下发：GCU 的 Fan/Status 是 retained 消息，
 	// 连上就会把当前真实模式推过来，直接以控制台为准即可。
 	time.AfterFunc(1200*time.Millisecond, app.gcu.Refresh)
 
-	app.logf("启动完成 提权=%v 自启=%v(%s) 自动提权标记=%v GCU自愈=%v 托盘项=%v 图标尺寸=%d",
+	app.logf("启动完成 提权=%v 自启=%v(%s) 自动提权标记=%v 托盘项=%v 图标尺寸=%d",
 		isElevated(), app.cfg.AutoStart, autostartMechanism, app.cfg.AutoElevate,
-		app.cfg.AutoGCU, app.cfg.trayItems(), smallIconSize())
+		app.cfg.trayItems(), smallIconSize())
 
 	// 启动命令：延迟若干秒执行一次（放在 GCU 同步之后，避免被模式切换覆盖）
 	if app.cfg.RunEnabled && strings.TrimSpace(app.cfg.RunPath) != "" {
