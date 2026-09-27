@@ -1,0 +1,95 @@
+{
+  "version": 6,
+  "auto_start": true,
+  "auto_elevate": true,
+  "client_index": 4,
+  "items": [
+    {
+      "key": "office",
+      "mode": 0,
+      "slot": -1,
+      "name": "静音",
+      "show_tray": true,
+      "icon_color": 2600544,
+      "icon_glyph": "E",
+      "power_plan": "381b4222-f694-41f0-9685-ff5bb260df2e"
+    },
+    {
+      "key": "balance",
+      "mode": 1,
+      "slot": -1,
+      "name": "均衡",
+      "show_tray": true,
+      "icon_color": 3113197,
+      "icon_glyph": "B",
+      "power_plan": "381b4222-f694-41f0-9685-ff5bb260df2e"
+    },
+    {
+      "key": "turbo",
+      "mode": 2,
+      "slot": -1,
+      "name": "狂暴",
+      "show_tray": true,
+      "icon_color": 14828636,
+      "icon_glyph": "G",
+      "power_plan": "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+    },
+    {
+      "key": "custom1",
+      "mode": 3,
+      "slot": 0,
+      "name": "自定义 1",
+      "show_tray": true,
+      "icon_color": 2600544,
+      "icon_glyph": "1",
+      "power_plan": "381b4222-f694-41f0-9685-ff5bb260df2e"
+    },
+    {
+      "key": "custom2",
+      "mode": 3,
+      "slot": 1,
+      "name": "自定义 2",
+      "show_tray": true,
+      "icon_color": 3113197,
+      "icon_glyph": "2",
+      "power_plan": "381b4222-f694-41f0-9685-ff5bb260df2e"
+    },
+    {
+      "key": "custom3",
+      "mode": 3,
+      "slot": 2,
+      "name": "自定义 3",
+      "show_tray": true,
+      "icon_color": 14828636,
+      "icon_glyph": "3",
+      "power_plan": "381b4222-f694-41f0-9685-ff5bb260df2e"
+    },
+    {
+      "key": "custom4",
+      "mode": 3,
+      "slot": 3,
+      "name": "自定义 4",
+      "show_tray": true,
+      "icon_color": 10179040,
+      "icon_glyph": "4",
+      "power_plan": "381b4222-f694-41f0-9685-ff5bb260df2e"
+    },
+    {
+      "key": "custom5",
+      "mode": 3,
+      "slot": 4,
+      "name": "自定义 5",
+      "show_tray": true,
+      "icon_color": 10179040,
+      "icon_glyph": "5",
+      "power_plan": "381b4222-f694-41f0-9685-ff5bb260df2e"
+    }
+  ],
+  "cur_key": "custom1",
+  "auto_gcu": true,
+  "run_enabled": false,
+  "run_path": "",
+  "run_args": "",
+  "run_delay_sec": 0,
+  "run_elevate": false
+}

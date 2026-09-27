@@ -1,0 +1,3 @@
+taskkill /F /IM MechrevoMode.exe
+timeout /t 3 /nobreak > nul
+schtasks /Run /TN MechrevoMode

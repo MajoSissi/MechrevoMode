@@ -1,0 +1,2 @@
+"D:\User\Desktop\MechrevoMode\MechrevoMode.exe" -dump-power
+timeout /t 22 /nobreak > nul

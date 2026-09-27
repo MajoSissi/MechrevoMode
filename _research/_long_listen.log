@@ -1,0 +1,5 @@
+已连接 UWPClient_1，订阅 ['System/CpuInfo', 'System/GpuInfo', 'System/FanInfo', 'System/MemoryInfo', 'Monitor/Status', 'Customize/Info', 'System/HardwareInfo']，被动监听 150 秒（不发任何消息）…
+SUBACK rc=0
+
+---- 收到的 topic ----
+  （什么都没有 —— 没有任何客户端在周期推送）

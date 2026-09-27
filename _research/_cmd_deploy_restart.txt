@@ -1,0 +1,2 @@
+D:\User\Desktop\MechrevoMode\_research\_deploy_install.bat
+schtasks /Run /TN MechrevoMode

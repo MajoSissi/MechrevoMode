@@ -1,0 +1,99 @@
+{
+  "version": 2,
+  "auto_start": false,
+  "restore_on_start": false,
+  "client_index": 0,
+  "items": [
+    {
+      "key": "office",
+      "mode": 0,
+      "slot": -1,
+      "name": "办公",
+      "show_tray": true,
+      "icon_color": 3113197,
+      "icon_glyph": "O",
+      "power_plan": ""
+    },
+    {
+      "key": "balance",
+      "mode": 1,
+      "slot": -1,
+      "name": "均衡",
+      "show_tray": true,
+      "icon_color": 2600544,
+      "icon_glyph": "B",
+      "power_plan": ""
+    },
+    {
+      "key": "turbo_game",
+      "mode": 2,
+      "slot": 0,
+      "name": "游戏狂暴",
+      "show_tray": true,
+      "icon_color": 14828636,
+      "icon_glyph": "G",
+      "power_plan": ""
+    },
+    {
+      "key": "turbo_silent",
+      "mode": 2,
+      "slot": 1,
+      "name": "静音狂暴",
+      "show_tray": true,
+      "icon_color": 15898954,
+      "icon_glyph": "S",
+      "power_plan": ""
+    },
+    {
+      "key": "custom1",
+      "mode": 3,
+      "slot": 0,
+      "name": "自定义 1",
+      "show_tray": true,
+      "icon_color": 10179040,
+      "icon_glyph": "1",
+      "power_plan": ""
+    },
+    {
+      "key": "custom2",
+      "mode": 3,
+      "slot": 1,
+      "name": "自定义 2",
+      "show_tray": true,
+      "icon_color": 10179040,
+      "icon_glyph": "2",
+      "power_plan": ""
+    },
+    {
+      "key": "custom3",
+      "mode": 3,
+      "slot": 2,
+      "name": "自定义 3",
+      "show_tray": true,
+      "icon_color": 10179040,
+      "icon_glyph": "3",
+      "power_plan": ""
+    },
+    {
+      "key": "custom4",
+      "mode": 3,
+      "slot": 3,
+      "name": "自定义 4",
+      "show_tray": true,
+      "icon_color": 10179040,
+      "icon_glyph": "4",
+      "power_plan": ""
+    },
+    {
+      "key": "custom5",
+      "mode": 3,
+      "slot": 4,
+      "name": "自定义 5",
+      "show_tray": true,
+      "icon_color": 10179040,
+      "icon_glyph": "5",
+      "power_plan": ""
+    }
+  ],
+  "cur_key": "custom1"
+}

@@ -1,0 +1,317 @@
+---- [Customize/SupportInfo]
+{
+  "CustomizeTarget": 56,
+  "ProjectID": 26,
+  "UninstallCalibration": 1,
+  "ColorCalibration": 1,
+  "ServiceReady": 1,
+  "AcRecoverySwitchBiosSupport": 0,
+  "AcRecoverySwitchSupport": 1,
+  "ColorCalibrationSupport": 2,
+  "DGpuDirectConnectionSupport": 1,
+  "FanBoostBtnSupport": 1,
+  "IsAMDPlatform": 1,
+  "IsNvGpu": 1,
+  "LightbarSupport": 0,
+  "RGBLightbarSupport": 0,
+  "IsProjectIdCommercial": 0,
+  "IsProjectIdCommercialHAVE20DB": 0,
+  "FanSettingsSupport": 1,
+  "NumPadSupport": 0,
+  "OcSettingsSupport": 1,
+  "LiquidCoolingSupport": 0,
+  "LiquidCoolingAutoModeSupport": 1,
+  "RamFan1p5Support": 1,
+  "SystemMonitorSupport": 1,
+  "TurboModeSupport": 1,
+  "TypeCSupport": 0,
+  "IsHeroProject": 0,
+  "IsGamingMonitorSupport": 0,
+  "CPUPerformanceAndOverClockMenuSupport": 255,
+  "APVersionCheck": 24,
+  "OTASupport": 1,
+  "IsTurboSubModeSupport": 1,
+  "IsSmartBalanceSupport": 0,
+  "BIOS_PROJECT_ID": "IDK",
+  "Language": "zh-cn",
+  "LanguageList": "en-us,zh-cn",
+  "AutoDetectSystemLang": "DetectOff"
+}
+
+---- [Fan/Control]
+{
+  "Action": "GETSTATUS"
+}
+
+---- [Fan/Status]
+{
+  "IsAC": true,
+  "OverClockingSwitch": "0",
+  "OperatingMode": "3",
+  "GamingProfileIndex": "0",
+  "OfficeProfileIndex": "0",
+  "TurboProfileIndex": "0",
+  "CustomProfileIndex": "0",
+  "FanBoostEnable": "0",
+  "ProfileName": "Mode4_Profile1",
+  "FAN_FanSwitchSpeedEnabled": "0",
+  "FAN_FanSwitchSpeed": "300",
+  "FAN_TableName": "M4T1",
+  "FAN_SafetyProtectNotify": "0",
+  "FAN_SafetyProtect": "0",
+  "CPU_PL1": "75",
+  "CPU_PL1Maximum": "145",
+  "CPU_PL1Minimum": "10",
+  "CPU_PL2": "85",
+  "CPU_PL2Maximum": "145",
+  "CPU_PL2Minimum": "10",
+  "CPU_PL4": "85",
+  "CPU_PL4Maximum": "174",
+  "CPU_PL4Minimum": "10",
+  "CPU_OffsetCoreVoltage": "0",
+  "CPU_OffsetCoreVoltageOC": "0",
+  "CPU_OffsetCoreVoltageMaximum": "0",
+  "CPU_OffsetCoreVoltageMinimum": "0",
+  "CPU_OffsetCoreVoltageSupport": "255",
+  "CPU_TccOffsetSwitch": "1",
+  "CPU_TccOffsetMaximum": "98",
+  "CPU_TccOffset": "95",
+  "GPU_CoreClockOffset": "0",
+  "GPU_CoreClockOffsetOC": "0",
+  "GPU_CoreClockOffsetMaximum": "250",
+  "GPU_CoreClockOffsetMaximumHWOC": "250",
+  "GPU_CoreClockOffsetMinimum": "0",
+  "GPU_MemoryClockOffset": "0",
+  "GPU_MemoryClockOffsetOC": "0",
+  "GPU_MemoryClockOffsetMaximum": "1000",
+  "GPU_MemoryClockOffsetMaximumHWOC": "1800",
+  "GPU_MemoryClockOffsetMinimum": "-1000",
+  "GPU_MemoryClockOffsetMinimumHWOC": "-1800",
+  "GPU_TargetTemperature": "87",
+  "GPU_TargetTemperatureMaximum": "87",
+  "GPU_TargetTemperatureMinimum": "75",
+  "GPU_ConfigurableTGPSwitch": "1",
+  "GPU_ConfigurableTGPTarget": "50",
+  "GPU_ConfigurableTGPMaximum": "100",
+  "GPU_ConfigurableTGPMinimum": "50",
+  "GPU_DynamicBoostSwitch": "0",
+  "CustomTGPinGCUforGN21_Value": "100",
+  "CustomTGPinGCUforGN21_Enable": "0",
+  "CPU_PerformanceAndOverClockMenuSwitch": "0",
+  "GPU_DynamicBoost": "5",
+  "GPU_DynamicBoostMaximum": "15",
+  "GPU_DynamicBoostMinimum": "5",
+  "GPU_DynamicBoostTotalProcessingPowerTarget": "255",
+  "GPU_WhisperModeSupport": true,
+  "GPU_WhisperModeSwitch": "0",
+  "GPU_WhisperModeSetting": "0",
+  "GPU_WhisperModeMinFps_QUIETER": "30",
+  "GPU_WhisperModeMinFps_QUIET": "40",
+  "GPU_WhisperModeMinFps_BALANCED": "60",
+  "GPU_WhisperModeMinFpsMaximum": "60",
+  "GPU_WhisperModeMinFpsMinimum": "30",
+  "CPU_AmdSPL": "38",
+  "CPU_AmdSPPT": "38",
+  "CPU_AmdFPPT": "45",
+  "CPU_AmdTccTarget": "85",
+  "CPU_AmdOverClockSupport": "0",
+  "CPU_AmdCoreFreq": "0",
+  "CPU_AmdCoreFreqOC": "0",
+  "CPU_AmdCoreFreqMaximum": "0",
+  "CPU_AmdCoreVoltage": "0",
+  "CPU_AmdCoreVoltageOC": "0",
+  "CPU_AmdCoreVoltageMaximum": "0",
+  "MEM_MemoryOverClockSupport": "0",
+  "MEM_MemoryOverClockSwitch": "0",
+  "BSOD_DefaultNotify": "0",
+  "BSOD_TimestampRestored": "2023-03-23 11:32:04",
+  "OcSupport": true,
+  "IsAMDPlatform": true,
+  "IsNvGpu": true,
+  "TurboModeOption": "1",
+  "FanBoostBtnSupport": true,
+  "PowerMode": "1",
+  "CPU_PL4_Double_Flag": "0",
+  "TjMax": "95",
+  "Extreme": "0",
+  "Silent": "0",
+  "SmartBalance": "0",
+  "TurboGPUOCEnabled": true,
+  "GameWhitelistSwitch": 0
+}
+
+---- [GPUDevice/Status]
+{
+  "currentSaveingMode": 0,
+  "DisconnectMonitor": false,
+  "DC_Once": false,
+  "DC_HZ": true,
+  "MODE_HZ": false,
+  "Auto": false,
+  "currentHZ": 300,
+  "currentHZList": [
+    "60",
+    "240",
+    "300"
+  ],
+  "AutoEnable": true
+}
+
+---- [Hardware/Control]
+{
+  "Action": "GETSTATUS"
+}
+
+---- [HidLightbar_Logo/Status]
+{
+  "solution": null,
+  "type": null,
+  "brightNess": "3",
+  "powerStatus": "On",
+  "welcomeStatus": null,
+  "welcomeDirectionStatus": null,
+  "currentPowerMode": "AC"
+}
+
+---- [Keyboard/Status]
+{
+  "solution": "EC",
+  "type": "SingleZone",
+  "brightNess": "3",
+  "powerStatus": "Off",
+  "welcomeStatus": null,
+  "welcomeDirectionStatus": "LeftRight",
+  "ACBrightness": "3",
+  "DCBrightness": "0",
+  "auroraStatus": false,
+  "auroraExist": false,
+  "SingleZonePowerSupport": false,
+  "MonochromeIndex": null,
+  "ManualIndex1": null,
+  "ManualIndex2": null,
+  "ManualIndex3": null,
+  "ManualIndex4": null,
+  "ManualIndex5": null,
+  "ManualIndex6": null,
+  "ManualInterval": null,
+  "BreathingIndex": null,
+  "DefaultData": null,
+  "color": {
+    "isCircular": false,
+    "ColorBlocks": 0,
+    "ColorBuffer": null
+  },
+  "effect": null,
+  "light": null,
+  "speed": null,
+  "direction": null,
+  "nv_save": null,
+  "rkgcolor": null,
+  "backgroundcolor": 0,
+  "alphabet": null,
+  "level": 0,
+  "powerstatus": 0,
+  "LogoSupport": false,
+  "HingeSupport": false,
+  "BaseSupport": false,
+  "NewlogoSupport": false,
+  "MBlogoSupport": false,
+  "currentPowerMode": "AC"
+}
+
+---- [Languages/Control]
+{
+  "Action": "EnableTray"
+}
+
+---- [Monitor/Control]
+{
+  "Action": "GETSTATUS"
+}
+
+---- [Setting/Control]
+{
+  "Action": "GETSTATUS"
+}
+
+---- [Setting/Status]
+{
+  "WinKey": "WINKEY_STATUS_UNLOCK",
+  "LightBar": "LIGHTBAR_STATUS_ON",
+  "UsbCharger": "USB_CHARGER_STATUS_OFF",
+  "DGpu": "NV_CTRL_PANEL_AUTOSELECT",
+  "OSD": "OSD_HIDDEN_OFF",
+  "DisplayFeatureStatus": "DISPLAY_FEATURE_STATUS_ON",
+  "DisplayMode": "DISPLAY_STANDARD_MODE",
+  "GamingBrightness": "90",
+  "GamingRed": "0",
+  "GamingGreen": "0",
+  "GamingBlue": "0",
+  "GamingColorTemp": "0",
+  "GamingContrast": "0",
+  "VideoBrightness": "100",
+  "VideoColorTemp": "0",
+  "ReadBrightness": "90",
+  "ReadBlue": "-30",
+  "ReadColorTemp": "0",
+  "CutomizedBrightness": "90",
+  "CutomizedRed": "0",
+  "CutomizedGreen": "0",
+  "CutomizedBlue": "0",
+  "CutomizedColorTemp": "0",
+  "CutomizedContrast": "0",
+  "SingleColorKBBL": "SINGLE_COLOR_KBBL_STATUS_ON",
+  "CloseTimer": "10",
+  "ColorCalibrationResultCode": "0",
+  "NumPad": "NUMPAD_LOCK",
+  "FnKey": "FNKEY_UNLOCK",
+  "TouchpadToggle": "TOUCHPAD_TOGGLE_ON",
+  "AcRecoverySwitch_Support": "Support",
+  "AcRecoverySwitch_Status": "ACRECOVERY_TOGGLE_OFF",
+  "FnWith1HotkeySwitch_Status": "FN_WITH1_HOTKEY_TOGGLE_ON",
+  "DiscreteGpuDirectConnectionSwitch_Status": "DGPU_DIRECT_CONNECT_TOGGLE_ON",
+  "DiscreteGpuDirectConnectionSwitch_Support": "Support",
+  "IGpuOnlyConnectionSwitch_Status": "IGPU_ONLY_CONNECT_RB_OFF",
+  "IGpuOnlyConnectionSwitch_Support": "Enable",
+  "IGpuAutoSupportSwitch": "IGPU_ONLY_CHECK_IGPU_AUTO_DETECT_OFF",
+  "LocalDimmingSwitch": "LOCALDIMMING_ON",
+  "HighPerformancePowerModeSwitch": "HIGHPERFORMANCEPOWERMODE_ON",
+  "CopilotKey": "COPILOTKEY_LOCK",
+  "ColorCalibrationSwitch": "1",
+  "CurrentColorCalibration": "1",
+  "DeepSleepSwitch": "DEEPSLEEP_ON",
+  "DeepSleepTime": "1800",
+  "BatteryLogo_Status": "BATTERYLOGO_TOGGLE_OFF",
+  "LCDOverdriveSwitch": "LCDOverdrive_OFF",
+  "UniSwitch": "Uni_OFF",
+  "OmniSwitch": "Omni_OFF",
+  "MicNoiseReductionSupport": "NotSupport",
+  "LCDOverdriveSupport": "NotSupport",
+  "PowerLightSwitch": "0",
+  "PowerLightBrightness": "100"
+}
+
+---- [Settings/Control]
+{
+  "Action": "GETSTATUS"
+}
+
+---- [Settings/DeviceSwitchItemStatus]
+{
+  "WIFIEnable": true,
+  "BTEnable": true,
+  "WebCamEnable": true,
+  "TochpadEnable": true,
+  "ScreenBrightness": 80
+}
+
+---- [System/Control]
+{
+  "Action": "GETSTATUS"
+}
+
+---- [SystemMonitor/Control]
+{
+  "Action": "GETSTATUS"
+}
+

@@ -1,0 +1,9 @@
+已连接 UWPClient_1，订阅 ['#']，被动监听 70 秒（不发任何消息）…
+SUBACK rc=0
+
+---- 收到的 topic ----
+  Customize/SupportInfo              ×1    仅 1 次          {"CustomizeTarget":56,"ProjectID":26,"UninstallCalibration":1,"ColorCalibration":1,"ServiceReady":1,"AcRecoverySwitchBiosSupport":0,"AcRecoverySwitchS
+  HidLightbar_Logo/Status            ×1    仅 1 次          {"solution":null,"type":null,"brightNess":"3","powerStatus":"On","welcomeStatus":null,"welcomeDirectionStatus":null,"currentPowerMode":"AC"}
+  Keyboard/Status                    ×1    仅 1 次          {"solution":"EC","type":"SingleZone","brightNess":"3","powerStatus":"Off","welcomeStatus":null,"welcomeDirectionStatus":"LeftRight","ACBrightness":"3"
+  Languages/Control                  ×1    仅 1 次          {"Action":"EnableTray"}
+  Settings/DeviceSwitchItemStatus    ×1    仅 1 次          {"WIFIEnable":true,"BTEnable":true,"WebCamEnable":true,"TochpadEnable":true,"ScreenBrightness":80}
