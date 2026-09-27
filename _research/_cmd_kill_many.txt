@@ -1,0 +1,5 @@
+taskkill /F /IM CCUWinUI.exe
+taskkill /F /IM SystrayComponent.exe
+taskkill /F /IM OSDTpDetect.exe
+taskkill /F /IM GCUService.exe
+exit /b 0

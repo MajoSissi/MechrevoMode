@@ -1,0 +1,1 @@
+start "" "C:\Program Files\WindowsApps\CCU.WinUI_5.56.60.34_x64__wrbgcf7aesyd8\Win32\SystrayComponent.exe"

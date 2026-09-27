@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // 真机抓到的 System/FanInfo 报文（GCU 固定每 2 秒推一条）。
@@ -292,6 +293,85 @@ func TestTipEmojiBudget(t *testing.T) {
 	for _, c := range cases {
 		if got := len(utf16Buf(c.s)) - 1; got != c.want {
 			t.Errorf("%q 占 %d 个 UTF-16 码元，期望 %d", c.s, got, c.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------- 遥测唤醒
+
+// 唤醒节流是纯逻辑，必须单独钉死：maybeArmFan 判定通过后会真去启动控制台，
+// 一旦条件写错，用户就会在开机后被反复弹窗。
+func TestShouldArmFan(t *testing.T) {
+	base := time.Date(2026, 9, 28, 0, 0, 0, 0, time.Local)
+	cases := []struct {
+		name   string
+		now    time.Time
+		fanAt  time.Time
+		armAt  time.Time
+		online bool
+		want   bool
+	}{
+		{"没连上不动", base, base.Add(-10 * time.Minute), time.Time{}, false, false},
+		{"fanAt 零值=还没开始计时", base, time.Time{}, time.Time{}, true, false},
+		{"刚连上不触发", base, base, time.Time{}, true, false},
+		{"静默 10 秒还不该动", base, base.Add(-10 * time.Second), time.Time{}, true, false},
+		{"静默刚过宽限就触发", base, base.Add(-fanArmGrace - time.Second), time.Time{}, true, true},
+		{"静默很久但刚试过→限流", base, base.Add(-10 * time.Minute),
+			base.Add(-time.Minute), true, false},
+		{"静默很久且超过重试间隔→再试", base, base.Add(-10 * time.Minute),
+			base.Add(-fanArmRetry - time.Second), true, true},
+	}
+	for _, c := range cases {
+		if got := shouldArmFan(c.now, c.fanAt, c.armAt, c.online); got != c.want {
+			t.Errorf("%s: shouldArmFan = %v, 期望 %v", c.name, got, c.want)
+		}
+	}
+}
+
+// 收到转速必须把静默计时打上，并把限流时钟清掉 ——
+// 否则「遥测断了一阵又回来」这类情况会被旧的 armAt 一直卡住。
+func TestFanInfoMarksArmedAndClearsThrottle(t *testing.T) {
+	g := NewGCU(3, nil)
+	g.mu.Lock()
+	g.online = true
+	g.armAt = time.Now() // 假装刚弹过一次控制台
+	g.mu.Unlock()
+
+	g.handleFanInfo([]byte(rawFanInfo))
+
+	g.mu.Lock()
+	fanAt, armAt, fan := g.fanAt, g.armAt, g.fan
+	g.mu.Unlock()
+
+	if fanAt.IsZero() {
+		t.Error("收到 FanInfo 后 fanAt 仍为零值，静默计时没打上")
+	}
+	if !armAt.IsZero() {
+		t.Error("收到 FanInfo 后 armAt 没清空，下次静默会被限流卡住")
+	}
+	if fan.CPU != 2990 || fan.GPU != 2854 {
+		t.Errorf("转速没入库: %+v", fan)
+	}
+}
+
+// 控制中心的 UWP 包族名不能写死（升级就变），所以从包 ID 折出来。
+// 这里的输入是真机上查到的包 ID。
+func TestPFNFromPackageID(t *testing.T) {
+	cases := []struct {
+		id   string
+		want string
+	}{
+		{"CCU.WinUI_5.56.60.34_x64__wrbgcf7aesyd8", "CCU.WinUI_wrbgcf7aesyd8"},
+		{"Microsoft.GamingApp_2508.1001.27.0_neutral_split.language-zh-hans_8wekyb3d8bbwe",
+			"Microsoft.GamingApp_8wekyb3d8bbwe"},
+		{"没有下划线", ""},
+		{"", ""},
+		{"缺发布者__", ""},
+		{"Name_1.0_x64__", ""}, // 发布者哈希为空 → 认不出来，宁可返回空
+	}
+	for _, c := range cases {
+		if got := pfnFromPackageID(c.id); got != c.want {
+			t.Errorf("pfnFromPackageID(%q) = %q, 期望 %q", c.id, got, c.want)
 		}
 	}
 }

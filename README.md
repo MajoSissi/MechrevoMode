@@ -98,7 +98,7 @@ GCU 后台一共**两个**组件，缺一不可：
 而 `CpuFanRpm` 是原生数字 —— 两种都得能解析（见 `gcuNum`）。
 其余三十来个主题（`System/Control`、`Monitor/Status`…）订阅了也一条都不来，所以不订。
 
-两个细节值得一提：
+三个细节值得一提：
 
 - **档位落定期**。GCU 切换过程中会先回几条旧状态，照单全收的话档位会被冲回上一个值。
   所以下发后有一段落定期，期间只接受与目标 `mode+slot` 完全一致的回报。
@@ -106,6 +106,12 @@ GCU 后台一共**两个**组件，缺一不可：
   而服务上**没有**配置恢复动作 —— 于是端口无人监听、永远连不上，
   直到你手动打开一次官方控制台。本工具会检测并主动把后端拉起来
   （间隔 40 秒、留足冷启动宽限期，不会催得过急）。
+- **遥测唤醒**。转速那条 `System/FanInfo` 有个更隐蔽的毛病：后端进程都活着、端口也通、
+  `Fan/Status` 和 `Tray/Status` 一上来就有，**唯独转速一条不来** —— 直到你手动开一次
+  官方控制台。原因是 GCU 内部有套「武装」状态活在 `GCUService` 进程内存里，开机那次
+  武装失败且**不重试**，于是每次开机都得手动点一下控制台。本工具连上后如果 25 秒还没
+  收到任何转速，就自动按 AUMID 启动一次官方控制台把它唤醒（实测约 10 秒后转速开始来），
+  之后转速自己会**持续推送**，所以不会反复弹窗（详见下方「已知限制」）。
 
 ## 环境要求
 
@@ -151,9 +157,12 @@ data\
 
 ## 从源码构建
 
+双击 `build.bat` 即可，产物在 **`build\MechrevoMode.exe`**（`build\` 已在 `.gitignore` 里）。
+手动构建等价于：
+
 ```bash
 go test ./...
-go build -trimpath -ldflags "-s -w -H windowsgui" -o MechrevoMode.exe .
+go build -trimpath -ldflags "-s -w -H windowsgui" -o build/MechrevoMode.exe .
 ```
 
 `-H windowsgui` 是必须的，否则会多出一个控制台窗口。注意这样构建出来的程序**没有 stdout**，
@@ -162,13 +171,40 @@ go build -trimpath -ldflags "-s -w -H windowsgui" -o MechrevoMode.exe .
 依赖只有 `github.com/eclipse/paho.mqtt.golang`（MQTT 客户端），其余全是标准库 + `syscall`。
 没有 cgo，产物就是单个 exe。
 
+### 程序图标
+
+exe 的图标来自 `img/logo.ico`，做法是把图标编译成资源对象 `rsrc_windows_amd64.syso`
+放仓库根目录 —— Go 链接器会**自动**把同目录下的 `.syso` 链进产物，不需要改任何代码。
+这个 `.syso` 已入库，所以直接 `go build` 也有图标。
+
+换了 `logo.ico` 之后跑一次 `img\make-icon.bat` 重新生成（需要
+`go install github.com/akavel/rsrc@latest`）。它只认 `.ico` 里的 256/48/32/16 四个尺寸，
+换图时别只留一个尺寸。
+
+验证图标真的进去了（不是只有个空目录项）：
+
+```bash
+python _research/_verify_exe_icon.py build/MechrevoMode.exe img/logo.ico
+python _research/_shell_icon_check.py build/MechrevoMode.exe   # 问 Shell 要图标
+```
+
+后者用的是 `ExtractIconExW` —— 和资源管理器取文件图标走的是同一个口子，
+返回 1 才说明 Windows 真的认这张图。
+
+> **写 .bat 的两个坑**（`build.bat` 里都踩过）：
+> 1. 脚本保持**纯 ASCII**。cmd 在 UTF-8 代码页（65001）下解析含中文的 `.bat` 会
+>    拆错行，连后面的纯 ASCII 行一起毁掉；`chcp 65001` 开头也救不回来。
+> 2. 调 `go` 一定要写 `call go`。mise / asdf / scoop 之类的 shims 目录里放的是
+>    `go.cmd`，而 .bat 里不写 `call` 直接调用另一个 `.cmd`，控制权就交出去不回来了 ——
+>    后面的步骤**静默消失**，脚本还返回 0。
+
 ### 代码导读
 
 | 文件 | 职责 |
 | --- | --- |
 | `main.go` | 窗口过程、托盘（图标 / 提示 / 菜单）、单实例互斥体、启动流程与自检分支 |
 | `telemetry.go` | 悬浮提示的显示常量（🌡 ⚡ 🌀 ℃）、转速两行的排版与文本拼装 |
-| `gcu.go` | GCU MQTT 客户端：连接与序号探测、状态解析、命令下发、后端自愈 |
+| `gcu.go` | GCU MQTT 客户端：连接与序号探测、状态解析、命令下发、后端自愈与遥测唤醒 |
 | `config.go` | 配置结构与迁移、数据目录解析、开机自启（注册表 / 计划任务） |
 | `ui.go` | 设置界面全部控件的创建与事件处理 |
 | `power.go` | 电源计划枚举与切换（含「卓越性能」的按需复制与 GUID 固定） |
@@ -176,6 +212,9 @@ go build -trimpath -ldflags "-s -w -H windowsgui" -o MechrevoMode.exe .
 | `icon.go` | 托盘图标位图生成（圆角正方形 + 5×7 点阵字模 + 超采样抗锯齿） |
 | `icon_dump.go` | 图标自检图 |
 | `win32.go` | 全部 Win32 API 绑定 |
+| `img/logo.ico` | 程序图标源文件；`img/make-icon.bat` 据此生成 `rsrc_windows_amd64.syso` |
+| `rsrc_windows_amd64.syso` | 图标资源对象（已入库），链接器自动把它嵌进 exe |
+| `build.bat` | 一键构建，产物落到 `build\`（该目录不入库） |
 
 `_research/` 是开发期的探测脚本（Python + ctypes），用来验证界面交互、托盘行为、
 MQTT 报文格式等。不参与构建，但排查问题时很好用。
@@ -194,9 +233,11 @@ MQTT 报文格式等。不参与构建，但排查问题时很好用。
   走计划任务的开机自启不弹。
 - **模式编号沿用官方枚举**：0 办公 / 1 均衡 / 2 狂暴 / 3 自定义。自定义模式下有 5 个档位，
   本工具的自定义档位就是这 5 个。
-- **风扇转速可能一直显示 `--`**。`System/FanInfo` 的推送在实测中是**间歇性**的 ——
-  同一台机器上曾稳定 2 秒一条，也会连着几十分钟一条都不来（重启 `GCUService` 也无效，
-  原因未查明）。这是 GCU 后端自己的行为，本工具拿不到就如实显示 `--`，不猜、不缓存旧值。
+- **风扇转速开机后可能先显示一阵 `--`**。`System/FanInfo` 靠 GCU 内部一套「武装」状态
+  驱动，而这套状态**每次开机重置、开机那次武装会失败且不重试** —— 所以刚开机那 25 秒
+  转速格是 `--`，之后本工具会自动启动一次官方控制台把遥测唤醒（见上方「遥测唤醒」）。
+  这一步是静默的：只启动控制台、不点任何页面，它把遥测带起来后即便把控制台窗口关掉，
+  转速也**照推不误**（实测 75 秒 31 条真值）—— 所以不会出现「每几分钟弹一次窗」的情况。
   上两行限制信息不受影响（走的是 `Fan/Status`，一直正常）。
 - 只针对**机械革命 + GCU** 这套后台。换成没有 GCU 的机器，连不上就是连不上。
 
@@ -209,6 +250,11 @@ MQTT 报文格式等。不参与构建，但排查问题时很好用。
 - 提示里的三个图标在「提示字体（Microsoft YaHei UI）」下能画出真实字形，不是豆腐块；
   星平面 emoji 的 UTF-16 码元开销也一并钉住（`_emoji_render_check.py`、`TestTipEmojiBudget`）
 - 转速行的格式、`--` 占位、缺字段与脏值的处理（`telemetry_test.go`，用的真机报文）
+- **开机后转速自动唤醒**：冷状态下不碰任何东西，程序在转速静默 25 秒后启动官方控制台，
+  约 11 秒后托盘提示出现真实转速（`_e2e_arm_validate.py`，判据取程序自己的日志）
+- 唤醒限流：两次尝试至少隔 3 分钟，收到转速后立刻解除限流（`TestShouldArmFan`）
+- 控制中心 AUMID 从注册表动态解析，包升级不会失效（`TestPFNFromPackageID`）
+- 关掉控制台窗口后转速仍持续推送（75 秒 31 条真值、0 条占位）
 - 右键菜单零延迟弹出（实测 10~27 ms）
 - 左键单击 / 双击立刻打开设置界面（5.5 ms）
 - 开机自启的开关与保存真的会改写计划任务 / 注册表
