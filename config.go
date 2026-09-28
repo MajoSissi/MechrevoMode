@@ -846,38 +846,6 @@ func regGetStringRO(hive uintptr, sub, name string) (string, bool) {
 	return utf16ToGoStr(buf), true
 }
 
-// regEnumSubKeysRO 列出某个键下的所有子键名（只读）。
-//
-// 用途：动态找出官方控制中心的 UWP 包族名。厂商自带的 ControlCenterU.exe
-// 把包名写死成了 ControlCenter3_h329z55cwnj8g，控制中心升级后那个启动器
-// 就再也拉不起界面了（实测：跑它什么都不会发生）。这里改成从注册表查。
-func regEnumSubKeysRO(hive uintptr, sub string) []string {
-	h, ok := regOpenRO(hive, sub)
-	if !ok {
-		return nil
-	}
-	defer pRegCloseKey.Call(h)
-
-	var out []string
-	for i := 0; i < 4096; i++ {
-		buf := make([]uint16, 512)
-		n := uint32(len(buf))
-		ret, _, _ := pRegEnumKeyExW.Call(
-			h,
-			uintptr(i),
-			uintptr(unsafe.Pointer(&buf[0])),
-			uintptr(unsafe.Pointer(&n)),
-			0, 0, 0, 0,
-		)
-		if ret != 0 { // ERROR_NO_MORE_ITEMS = 259，以及其它错误都收工
-			break
-		}
-		buf[len(buf)-1] = 0
-		out = append(out, utf16ToGoStr(buf))
-	}
-	return out
-}
-
 // regEnumStringValues 列出某个键下所有 REG_SZ 值（诊断用）
 func regEnumStringValues(hive uintptr, sub string) map[string]string {
 	out := map[string]string{}

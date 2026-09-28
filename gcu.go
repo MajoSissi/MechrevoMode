@@ -45,24 +45,12 @@ const (
 	topicFanStat  = "Fan/Status"
 	topicTrayStat = "Tray/Status"
 
-	// 实时遥测。订阅 System/FanInfo 就能拿到两个风扇的转速 ——
-	// 不需要发任何「打开遥测」的动作，也**不要**用 "#" 通配：
-	// 通配会把 SupportInfo / Keyboard / HidLightbar 那些无关主题一起拉过来，
-	// 白白增加解析开销。
-	//
-	// 实测只有 CpuInfo / GpuInfo / FanInfo / MemoryInfo / NetworkInfo 会推数据，
-	// 其余三十来个主题（System/Control、System/BatteryInfo、Monitor/Status…）
-	// 订阅了也一条都不来。温度虽然 CpuInfo/GpuInfo 里有，但托盘提示用不上，
-	// 索性不订阅；GCU 则**任何主题都没有**功耗字段。
-	topicFanInfo = "System/FanInfo"
-
-	// 系统监控的开关。官方控制台启动时会往这里发 {"Action":"System_ON"}，
-	// 之后 GCU 才开始按 2 秒一拍的节奏推送 System/*Info 遥测。
-	//
-	// （本条常量上面那段旧注释说「System/Control 订阅了也一条都不来」——
-	// 没错，因为它是**命令主题**：只收命令、不发数据，本来就不该有回包。）
-	topicSystemCtrl = "System/Control"
-	systemOnPayload = `{"Action":"System_ON"}`
+	// 曾经订阅的 System/FanInfo（风扇转速）已随「托盘不再显示转速」一并移除。
+	// 记一笔免得以后有人再走这条路：那条主题要 GCU 内部先被「武装」才会推数据，
+	// 而开机时常常武装失败且**不重试**，用户侧的表现就是「必须先手动打开一次
+	// 官方控制台，提示里才有转速」；让程序自己去武装就得拉起那个控制台窗口，
+	// 代价比收益大。同理不订阅别的 System/*：托盘提示用不上，
+	// 而 GCU **任何主题都没有**功耗字段。
 
 	mqtt311 = 4
 
@@ -87,14 +75,6 @@ const (
 	// 另外检查是在下面的 20 秒周期里做的，所以真正生效的门限是「45 秒之后的第一个
 	// 周期点」，也就是 60 秒 —— 正常冷启动（约 43 秒出状态）不会触发，一个误报都没有。
 	brokerSilentGrace = 45 * time.Second
-)
-
-// 遥测唤醒（见 maybeArmFan）
-const (
-	// 连上 broker 之后这么久还收不到风扇转速，就认为 GCU 的遥测没被唤醒
-	fanArmGrace = 25 * time.Second
-	// 两次「唤醒遥测」尝试之间的最小间隔，避免反复弹控制台
-	fanArmRetry = 3 * time.Minute
 )
 
 // 模式编号与官方枚举一致：0 办公 / 1 均衡 / 2 狂暴 / 3 自定义
@@ -143,18 +123,6 @@ type GCU struct {
 	// 当前模式的功耗/温度墙，供托盘悬浮提示显示（见 formatLimits）
 	limits Limits
 
-	// 最近一次 System/FanInfo 的两个风扇转速，供托盘悬浮提示显示（见 FanRPM）
-	//
-	// 刻意**不用**回调通知 UI：托盘提示本来就有自己的重绘节拍，
-	// 走回调只会让每条遥测都多发一条窗口消息，得不偿失。
-	fan FanRPM
-
-	// 遥测唤醒状态（见 maybeArmFan）。
-	// fanAt 是最后一次收到 System/FanInfo 的时刻 —— 用时刻而不是布尔量，
-	// 因为「多久没收到」才是判据；armAt 用来给唤醒尝试限流。
-	fanAt time.Time
-	armAt time.Time
-
 	// 探测到的可用客户端序号，-1 表示无新发现（由 UI 线程取走并落盘）
 	discIdx int
 	// 首选客户端序号（启动时从配置读入一次）
@@ -200,7 +168,6 @@ func NewGCU(prefer int, onChange StateChange) *GCU {
 		profile:   -1,
 		index:     -1,
 		discIdx:   -1,
-		fan:       unknownFanRPM(),
 	}
 }
 
@@ -232,13 +199,6 @@ func (g *GCU) Limits() Limits {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.limits
-}
-
-// FanRPM 供托盘悬浮提示显示的风扇转速快照（UI 线程调用）
-func (g *GCU) FanRPM() FanRPM {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.fan
 }
 
 // Settling 是否处于「命令落定期」。落定期内状态回报还不可信，
@@ -306,11 +266,6 @@ func (g *GCU) setOnline(v bool) {
 	g.mu.Lock()
 	changed := g.online != v
 	g.online = v
-	if !v {
-		// 断线时把转速清空。这是「此刻的读数」，拿几十秒前的旧值继续显示
-		// 比显示 -- 更容易误导 —— 看着像风扇还在这转速上转。
-		g.fan = unknownFanRPM()
-	}
 	g.mu.Unlock()
 	if changed {
 		g.notify()
@@ -378,17 +333,6 @@ func (g *GCU) onConnected(c mqtt.Client) {
 		defer g.guard("handleTrayStatus")
 		g.handleTrayStatus(m.Payload())
 	})
-	c.Subscribe(topicFanInfo, 0, func(_ mqtt.Client, m mqtt.Message) {
-		defer g.guard("handleFanInfo")
-		g.handleFanInfo(m.Payload())
-	})
-	// 官方控制台启动时也会发这一条。实测它单独**不足以**唤醒遥测（试过 5 种
-	// client/QoS/retain/订阅组合都不行），但发出去零成本，先把我们摆到和控制台
-	// 一样的状态上；真正兜底的是 maybeArmFan 里的「启动控制台」。
-	c.Publish(topicSystemCtrl, 0, false, systemOnPayload)
-	g.mu.Lock()
-	g.fanAt = time.Now() // 静默计时从连上这一刻起算
-	g.mu.Unlock()
 	c.Publish(topicFanCtrl, 0, false, `{"Action":"GETSTATUS"}`)
 }
 
@@ -526,7 +470,6 @@ func (g *GCU) supervise() {
 					// 保持连接反复催，后端一活过来就能立刻收到状态。
 				}
 				client.Publish(topicFanCtrl, 0, false, `{"Action":"GETSTATUS"}`)
-				g.maybeArmFan()
 			}
 		}
 		client.Disconnect(60)
@@ -1129,196 +1072,6 @@ func (n *gcuNum) UnmarshalJSON(b []byte) error {
 	}
 	*n = 0
 	return nil
-}
-
-// fanInfoPayload 对应 System/FanInfo 的原始报文：
-//
-//	{"CpuFanDuty":55,"GpuFanDuty":55,"CpuFanRpm":2990,"GpuFanRpm":2854}
-//
-// Duty（占空比）我们用不上，但列在这里，改天要看风扇曲线时不用再去翻抓包。
-// 两个 Rpm 用**指针**接：JSON 里没有这个字段时是 nil，能真正区分「没上报」
-// 和「上报了 0」—— 风扇停转时 0 是合法读数，不能当缺失处理。
-type fanInfoPayload struct {
-	CpuFanDuty gcuNum  `json:"CpuFanDuty"`
-	GpuFanDuty gcuNum  `json:"GpuFanDuty"`
-	CpuFanRpm  *gcuNum `json:"CpuFanRpm"`
-	GpuFanRpm  *gcuNum `json:"GpuFanRpm"`
-}
-
-// saneRpm 把报文里的一项转速折算成可显示的值：
-// 字段缺失（nil）或数值超出合理上界都返回 unknownValue。
-func saneRpm(v *gcuNum) int {
-	if v == nil {
-		return unknownValue
-	}
-	n := int(*v)
-	if n < 0 || n > maxSaneRpm {
-		return unknownValue
-	}
-	return n
-}
-
-// handleFanInfo System/FanInfo：两个风扇的转速。
-//
-// 这是**唯一**能拿到笔记本风扇转速的地方：NVML 在笔记本上不支持风扇
-// （GetNumFans=0 / GetFanSpeed NOT_SUPPORTED），GCU 自己也是读 EC 得来的
-// （GetEcCpuFanRpm / GetEcGpuFanRpm）。
-func (g *GCU) handleFanInfo(payload []byte) {
-	var p fanInfoPayload
-	if err := json.Unmarshal(payload, &p); err != nil {
-		return
-	}
-	g.touchMsg()
-	next := FanRPM{CPU: saneRpm(p.CpuFanRpm), GPU: saneRpm(p.GpuFanRpm)}
-	g.mu.Lock()
-	g.fan = next
-	g.fanAt = time.Now()
-	g.armAt = time.Time{} // 已经拿到转速，下次再静默可以立刻重新尝试
-	g.mu.Unlock()
-}
-
-// ---------------------------------------------------------------- 遥测唤醒
-
-// maybeArmFan 在「broker 连得上、状态也照收，可就是没有风扇转速」时把 GCU 的遥测唤醒。
-//
-// 这是真机上反复复现的一个坑：开机后 GCUBridge 与 GCUService 都在跑、Fan/Status
-// 也照发，唯独 System/FanInfo 一条不来 —— 用户侧的表现就是「必须先手动打开一次
-// 机械革命控制台，悬浮提示里才会有转速」。实测结论：
-//
-//   - 打开官方控制台后约 10 秒，遥测开始；此后 GCU 每 2 秒自发推送，
-//     与有没有客户端订阅、订阅了哪些主题都无关
-//   - 武装状态活在 GCUService 进程里：结束它就被清掉（约 45 秒后一般又会自己回来），
-//     而开机那一次它武装失败且**不重试** —— 这就是用户每次开机都要手动开一下的原因
-//   - 我们自己往 System/Control 发 System_ON 试过 5 种变体（client 1/2/7、QoS 0/1、
-//     带 retain、带 System/# 或 # 订阅）**都叫不醒它**：官方控制台的命令不是走这条
-//     TCP 通道进去的，而是经 GCUBridge 的本地 IPC 桥，那个入口我们没有可用的口子
-//
-// 所以这里不去猜内部机制，直接做用户手动做的那一步：启动官方控制台。
-// 由 fanArmGrace 判定静默、fanArmRetry 限流，避免反复弹窗。
-func (g *GCU) maybeArmFan() {
-	g.mu.Lock()
-	if g.fanAt.IsZero() {
-		g.fanAt = time.Now()
-	}
-	now := time.Now()
-	silent := now.Sub(g.fanAt)
-	due := shouldArmFan(now, g.fanAt, g.armAt, g.online)
-	if due {
-		g.armAt = now
-	}
-	g.mu.Unlock()
-
-	if !due {
-		return
-	}
-	if err := launchConsoleApp(); err != nil {
-		g.logf("风扇转速已静默 %v，启动官方控制台失败：%v",
-			silent.Round(time.Second), err)
-		return
-	}
-	g.logf("风扇转速已静默 %v，已启动官方控制台唤醒遥测（实测约 10 秒后开始出转速）",
-		silent.Round(time.Second))
-	go g.verifyConsoleLaunch()
-}
-
-// shouldArmFan 判定此刻要不要发起一次唤醒尝试。
-//
-// 抽成纯函数是为了能单测：maybeArmFan 在判定通过后会真的去启动控制台，
-// 而单元测试里不能弹窗。
-//
-//   - 没连上就不动（连不上有 ensureBackend 那条线管，不要混在一起）
-//   - fanAt 是零值表示"还没开始计时"，按刚连上处理，不触发
-//   - 静默不足 fanArmGrace 不触发：GCUService 冷启动要 30~45 秒才发第一条状态，
-//     催太急只会平白弹一次控制台
-//   - armAt 限流：两次尝试至少隔 fanArmRetry
-func shouldArmFan(now, fanAt, armAt time.Time, online bool) bool {
-	if !online || fanAt.IsZero() {
-		return false
-	}
-	if now.Sub(fanAt) < fanArmGrace {
-		return false
-	}
-	return armAt.IsZero() || now.Sub(armAt) >= fanArmRetry
-}
-
-// consoleAppUserModelID 拼出官方控制中心的 AUMID（<包族名>!App），找不到返回空串。
-//
-// 包族名不能写死：它带发布者哈希，控制中心一升级就变。厂商自带的
-// ControlCenterU.exe 就是写死了旧包名 ControlCenter3_h329z55cwnj8g，
-// 结果现在跑它什么都不会发生（实测，白白浪费了一轮排查）。
-func consoleAppUserModelID() string {
-	const repo = `Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages`
-	for _, id := range regEnumSubKeysRO(hkeyCurrentUser, repo) {
-		if pfn := pfnFromPackageID(id); strings.HasPrefix(pfn, "CCU.") {
-			return pfn + "!App"
-		}
-	}
-	return ""
-}
-
-// pfnFromPackageID 把 UWP 包 ID 折成包族名（Package Family Name）：
-//
-//	CCU.WinUI_5.56.60.34_x64__wrbgcf7aesyd8  →  CCU.WinUI_wrbgcf7aesyd8
-//
-// 规则：包 ID 的第一段是包名、最后一段是发布者哈希，包族名 = "<包名>_<发布者哈希>"。
-//
-// 刻意按**最后一个单下划线**切，而不是去找 "__"：资源包的包 ID 里未必有双下划线
-// （如 Microsoft.GamingApp_..._neutral_split.language-zh-hans_8wekyb3d8bbwe），
-// 按 "__" 找会直接认不出来。认不出来就返回空串，让调用方跳过 —— 宁可不动，
-// 也不要拼出一个错误的 AUMID 去启动别的东西。
-func pfnFromPackageID(id string) string {
-	i := strings.Index(id, "_")
-	j := strings.LastIndex(id, "_")
-	if i <= 0 || j <= i || j+1 >= len(id) {
-		return ""
-	}
-	return id[:i] + "_" + id[j+1:]
-}
-
-// launchConsoleApp 启动官方控制中心界面。
-//
-// 必须经 `explorer.exe shell:AppsFolder\<AUMID>` 转一手，**不能**直接
-// ShellExecuteW("open", "shell:AppsFolder\\…")：本程序是以管理员身份跑的，
-// 提权进程自己去激活 UWP 会被挡掉 —— 调用返回成功、也不报错，就是什么都不发生。
-// 这个坑实际踩过：日志里明明写了「已启动官方控制台」，进程表里却一个控制台进程都没有。
-// 交给一直跑在用户会话里的 explorer 去激活才有效（已实测）。
-func launchConsoleApp() error {
-	aumid := consoleAppUserModelID()
-	if aumid == "" {
-		return errors.New("系统里找不到官方控制中心的 UWP 包")
-	}
-	ret, _, _ := pShellExecuteW.Call(
-		0,
-		uintptr(unsafe.Pointer(utf16FromString("open"))),
-		uintptr(unsafe.Pointer(utf16FromString("explorer.exe"))),
-		uintptr(unsafe.Pointer(utf16FromString(`shell:AppsFolder\`+aumid))),
-		0,
-		uintptr(swShowNormal),
-	)
-	if ret <= 32 { // ShellExecute 的约定：<=32 都是错误码
-		return fmt.Errorf("ShellExecute(explorer.exe) 返回 %d", ret)
-	}
-	return nil
-}
-
-// consoleAppProcess 官方控制中心界面的进程名（取自它的 AppxManifest：
-// <Application Id="App" Executable="CCUWinUI.exe">）。
-// 只用来在启动后回验一下，名字变了最多是少打一行确认日志，不影响功能。
-const consoleAppProcess = "CCUWinUI.exe"
-
-// verifyConsoleLaunch 启动后回头确认控制台真的起来了。
-//
-// 「调用成功」和「真的起来了」是两件事（见 launchConsoleApp 的注释），
-// 所以这里必须验效果而不是验返回值，否则日志会把假成功写得很像真的。
-func (g *GCU) verifyConsoleLaunch() {
-	defer g.guard("verifyConsoleLaunch")
-	time.Sleep(5 * time.Second)
-	if len(processPIDs(consoleAppProcess)) > 0 {
-		g.logf("官方控制台已起来（%s），等它把遥测带起来", consoleAppProcess)
-		return
-	}
-	g.logf("已请求启动官方控制台，但 5 秒后仍未看到 %s；转速要等下一次重试",
-		consoleAppProcess)
 }
 
 // ---------------------------------------------------------------- 下发命令

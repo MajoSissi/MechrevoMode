@@ -34,9 +34,9 @@ const (
 	idModeBase = 1000
 	idModeMax  = idModeBase + 128
 
-	// 托盘提示的重绘节拍。GCU 固定每 2 秒推一条 System/FanInfo，节拍跟它对齐 ——
-	// 比它快只是把同一个数值重新拼一遍，比它慢就会丢掉中间那次的显示。
-	// 重绘本身很便宜（把缓存好的几个数拼成字符串），而且只有文本真变了才发 NIM_MODIFY。
+	// 托盘提示的重绘节拍。限制信息变化时 GCU 那边已经会主动通知（见 notify），
+	// 这个定时器只是一层便宜的安全网：把缓存好的两行重新拼一遍，
+	// 只有文本真变了才发 NIM_MODIFY，所以不会闪。
 	tipTimerTick = 2000 // 毫秒
 )
 
@@ -351,23 +351,16 @@ func (a *App) current() (int, bool) {
 	return a.cfg.indexForModeSlot(mode, profile), true
 }
 
-// tooltip 光标停在托盘图标上时显示的文字，最多四行：
+// tooltip 光标停在托盘图标上时显示的文字，两行：
 //
-//	CPU - 85°C - 38/38/45W      ← 当前模式的温度墙 / 功耗墙（见 formatLimits）
-//	GPU - 87°C - 50W
-//	CPU 2990 RPM                ← 两个风扇的实时转速（见 FanRPM）
-//	GPU 2854 RPM
+//	CPU 🌡85℃ ⚡38/38/45W      ← 当前模式的温度墙 / 功耗墙（见 formatLimits）
+//	GPU 🌡87℃ ⚡50W
 //
-// 后两行紧接在限制信息下面，中间**不**加分隔线 —— 四行本来就是同一组读数，
-// 划线反而把它切成了两块不相干的东西。转速 2 秒重绘一次，跟随 GCU 的推送节拍。
-//
-// 两个降级分支：
-//   - 限制信息还没到但转速到了 → 只显示转速那两行（真读数不该被藏起来）
-//   - 两边都没有              → 退回老行为（模式名 / 未连接），免得只显示一行 --
+// 限制信息还没到（刚启动、后端没就绪）时退回老行为：显示模式名或「未连接」，
+// 免得托盘只剩一个光秃秃的图标还不知道自己是哪个档位。
 func (a *App) tooltip() string {
 	rows := a.gcu.Limits().Rows()
-	fan := a.gcu.FanRPM()
-	if len(rows) == 0 && fan.IsUnknown() {
+	if len(rows) == 0 {
 		idx, online := a.current()
 		if !online {
 			return "未连接"
@@ -377,7 +370,7 @@ func (a *App) tooltip() string {
 		}
 		return a.cfg.Items[idx].Name
 	}
-	return composeTip(rows, fan)
+	return composeTip(rows)
 }
 
 func fillUTF16(dst []uint16, s string) {

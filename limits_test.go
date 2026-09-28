@@ -191,24 +191,23 @@ func TestJoinWatts(t *testing.T) {
 }
 
 // TestTooltipFitsSzTip 托盘提示的容器是 NOTIFYICONDATA.szTip[128]，超长会被静默截断，
-// 所以限制信息改成 tooltip 之后必须确认四行拼起来仍然放得下
+// 所以限制信息放进提示之后必须确认拼起来仍然放得下
 // （这也是不在提示里再拼模式名的原因）。
 //
-// 2026-09-26 加上 emoji 之后这条更要紧：🌡(U+1F321) 和 🌀(U+1F300) 是**星平面**字符，
-// 在 UTF-16 里各占 2 个码元，比看上去贵一倍。
+// emoji 让这条更要紧：🌡(U+1F321) 是**星平面**字符，在 UTF-16 里占 2 个码元，
+// 比看上去贵一倍。
 //
-// 这里只盯真机报文：四份原始 Fan/Status 各配上真机量级的转速，都放得下才算数。
+// 这里只盯真机报文：四份原始 Fan/Status 都放得下才算数。
 // 「最宽可能值」那组在 telemetry_test.go 的 TestComposeTipWidestFitsSzTip。
 func TestTooltipFitsSzTip(t *testing.T) {
 	const maxContent = 128 - 1 // 留一个结尾 NUL
-	fan := FanRPM{CPU: 2990, GPU: 2854}
 	for _, c := range []struct{ name, raw string }{
 		{"自定义0", rawCustom0},
 		{"系统狂暴", rawTurbo},
 		{"非AMD", rawIntel},
 		{"DynamicBoost已开", rawBoostOn},
 	} {
-		text := composeTip(limitsOf(t, c.raw).Rows(), fan)
+		text := composeTip(limitsOf(t, c.raw).Rows())
 		n := len(utf16Buf(text)) - 1
 		if n > maxContent {
 			t.Errorf("%s: 提示文本 %d 个码元，超出 szTip 容量 %d：%q", c.name, n, maxContent, text)
