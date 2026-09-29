@@ -125,22 +125,6 @@ func lastLogLine(p string) string {
 	return strings.TrimRight(s, "\r")
 }
 
-// looksLikeCloudSync 判断路径是否位于常见的云同步目录里。
-//
-// 只用来给出提示，不做任何拦截 —— 用户把程序放在哪儿是他的自由。
-func looksLikeCloudSync(p string) bool {
-	if p == "" {
-		return false
-	}
-	low := strings.ToLower(p)
-	for _, marker := range []string{`\onedrive`, `\dropbox`, `\googledrive`, `\坚果云`, `\nutstore`} {
-		if strings.Contains(low, marker) {
-			return true
-		}
-	}
-	return false
-}
-
 // ---------------------------------------------------------------- 工具
 
 func utf16Buf(s string) []uint16 {
@@ -1165,13 +1149,9 @@ func main() {
 		app.logf("同步开机自启失败: %v", err)
 	}
 
-	// 自身在云同步目录里时提醒一句。
-	// 这类目录的文件可能被「按需下载 / 释放空间」解除本地化，只剩一个云端占位，
-	// 登录时无论注册表还是计划任务都拉不起来（而且是静默失败，很难查）。
-	if looksLikeCloudSync(exePath()) {
-		app.logf("提示：程序位于云同步目录（%s）。这类文件可能被「释放空间」变成云端占位，"+
-			"导致登录自启静默失败；挪到普通本地目录最稳妥。", exePath())
-	}
+	// 自身在云同步目录里不再提示 —— 用户把程序放哪儿是他的自由。
+	// 曾经这里会按路径里有没有 \OneDrive / \Dropbox / \坚果云 之类给一句警告，
+	// 但那只是噪音：既拦不住什么，也帮不上忙（真被「释放空间」了，日志本身也看不到）。
 
 	// 电源方案别名表：模板方案（「卓越性能」）复制出来的 GUID 需要固定下来
 	initPlanAlias(app.cfg.PlanAlias, func(m map[string]string) {
