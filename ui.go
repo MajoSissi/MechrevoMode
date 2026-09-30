@@ -14,23 +14,41 @@ import (
 // ---------------------------------------------------------------- 逻辑尺寸（96 DPI 基准）
 
 const (
-	uiWidth      = 780
+	uiWidth = 780
+
+	// 统一边距：分组框外沿距窗口 uiMargin，框内控件距窗口 uiInnerX。
+	// 底部按钮、状态文字也都落在这两条左右基准线上，整页看起来才是一条线。
+	uiMargin = 12
+	uiPad    = 12
+	uiInnerX = uiMargin + uiPad     // 24：控件左基准
+	uiInnerR = uiWidth - uiInnerX   // 756：控件右基准
+	uiBoxW   = uiWidth - 2*uiMargin // 756：分组框宽度
+
+	uiBtnW = 122 // 底部按钮统一尺寸
+	uiBtnH = 30
+
+	uiModeTop    = 40 // 「模式」分组框顶部
+	uiGroupGap   = 12 // 分组框之间的间距
+	uiHeadY      = 64 // 表头文字
 	uiRowsStartY = 86
 	uiRowH       = 32
 
-	uiColShowX  = 20
-	uiColNameX  = 68
+	uiColShowX  = uiInnerX
+	uiColNameX  = 72
 	uiColNameW  = 148
-	uiColOrigX  = 224
+	uiColOrigX  = 228
 	uiColOrigW  = 116
-	uiColGlyphX = 348
+	uiColGlyphX = 352
 	uiColGlyphW = 38
-	uiColColorX = 394
+	uiColColorX = 398
 	uiColColorW = 92
-	uiColPlanX  = 494
-	uiColPlanW  = 266
+	uiColPlanX  = 498
+	uiColPlanW  = uiInnerR - uiColPlanX // 258
 
-	uiRunH = 96 // 启动命令分组框高度
+	uiRunH     = 118 // 启动命令分组框高度：3 行 + 上下内边距
+	uiRunRow   = 24  // 区块内控件统一高度
+	uiRunEditX = 64  // 区块内输入框左边缘
+	uiRunBtnW  = 90  // 区块内「浏览…」宽度
 )
 
 // uiLayout 各区块的纵向位置。create 与 createControls 共用，避免两处算得不一致。
@@ -43,11 +61,12 @@ type uiLayout struct {
 }
 
 func layoutFor(n int) uiLayout {
-	modeBoxH := 52 + n*uiRowH
-	runTop := 40 + modeBoxH + 8
-	statusY := runTop + uiRunH + 10
+	// 表头区 (uiRowsStartY-uiModeTop) + n 行 + 底部内边距 6（行内已留 6）
+	modeBoxH := (uiRowsStartY - uiModeTop) + n*uiRowH + 6
+	runTop := uiModeTop + modeBoxH + uiGroupGap
+	statusY := runTop + uiRunH + uiGroupGap
 	btnY := statusY + 28
-	return uiLayout{modeBoxH, runTop, statusY, btnY, btnY + 48}
+	return uiLayout{modeBoxH, runTop, statusY, btnY, btnY + uiBtnH + 18}
 }
 
 // ---------------------------------------------------------------- 控件 ID
@@ -66,7 +85,6 @@ const (
 
 	uidSave    = 900
 	uidQuit    = 901
-	uidReset   = 902
 	uidStatus  = 910
 	uidRowBase = 200
 )
@@ -111,7 +129,6 @@ type UI struct {
 	lblStatus      uintptr
 	btnSave        uintptr
 	btnQuit        uintptr
-	btnReset       uintptr
 
 	// 启动命令区块
 	chkRun     uintptr
@@ -213,7 +230,7 @@ func (u *UI) createControls(n int) {
 	L := layoutFor(n)
 
 	u.chkAutoStart = u.mk("BUTTON", "开机自启动",
-		btnStyle|bsAutoCheckBox, 24, 14, 130, 22, uidAutoStart)
+		btnStyle|bsAutoCheckBox, uiInnerX, 14, 130, 22, uidAutoStart)
 
 	// 需要写 MSR 的工具（ryzenadj 之类）只有在管理员权限下才能工作。
 	// 勾上之后整个程序都以管理员身份运行，比单独给子进程提权省事。
@@ -226,13 +243,13 @@ func (u *UI) createControls(n int) {
 
 	// 分组框（模式表）
 	u.mk("BUTTON", "模式 · 托盘菜单 · 图标 · 电源计划",
-		wsChild|wsVisible|bsGroupBox, 12, 40, uiWidth-24, L.modeBoxH, 0)
+		wsChild|wsVisible|bsGroupBox, uiMargin, uiModeTop, uiBoxW, L.modeBoxH, 0)
 
 	// 表头
 	hdr := func(text string, x, w int) {
-		u.mk("STATIC", text, wsChild|wsVisible|ssLeft, x, 64, w, 18, 0)
+		u.mk("STATIC", text, wsChild|wsVisible|ssLeft, x, uiHeadY, w, 18, 0)
 	}
-	hdr("显示", uiColShowX-4, 40)
+	hdr("显示", uiColShowX-1, 40)
 	hdr("模式名称", uiColNameX, 100)
 	hdr("原始模式", uiColOrigX, 80)
 	hdr("图标", uiColGlyphX, 40)
@@ -264,48 +281,49 @@ func (u *UI) createControls(n int) {
 	u.createRunSection(L, btnStyle)
 
 	u.lblStatus = u.mk("STATIC", "", wsChild|wsVisible|ssLeft,
-		20, L.statusY, uiWidth-40, 20, uidStatus)
+		uiInnerX, L.statusY, uiInnerR-uiInnerX, 20, uidStatus)
 
+	// 底部一行：退出在左下、保存在右下，与 Windows 对话框的习惯一致。
 	u.btnQuit = u.mk("BUTTON", "退出程序", btnStyle|bsPushButton,
-		uiWidth-140, L.btnY, 118, 30, uidQuit)
+		uiInnerX, L.btnY, uiBtnW, uiBtnH, uidQuit)
 	u.btnSave = u.mk("BUTTON", "保存设置", btnStyle|bsDefPushButton,
-		uiWidth-272, L.btnY, 122, 30, uidSave)
-	u.btnReset = u.mk("BUTTON", "恢复默认外观", btnStyle|bsPushButton,
-		20, L.btnY, 122, 30, uidReset)
+		uiInnerR-uiBtnW, L.btnY, uiBtnW, uiBtnH, uidSave)
 }
 
 // createRunSection 启动命令区块
 func (u *UI) createRunSection(L uiLayout, btnStyle uintptr) {
 	u.mk("BUTTON", "启动命令",
-		wsChild|wsVisible|bsGroupBox, 12, L.runTop, uiWidth-24, uiRunH, 0)
+		wsChild|wsVisible|bsGroupBox, uiMargin, L.runTop, uiBoxW, uiRunH, 0)
 
-	y1 := L.runTop + 20
+	// 三行一律 uiRunRow 高、行距 30，最后一行的下沿距分组框 uiPad。
+	// 原先 y3 的下沿是 runTop+100 而分组框只有 96 高，「参数」框会压在边框上。
+	y1 := L.runTop + 22
 	u.chkRun = u.mk("BUTTON", "程序启动后运行命令",
-		btnStyle|bsAutoCheckBox, 24, y1, 156, 22, uidRunEnable)
+		btnStyle|bsAutoCheckBox, uiInnerX, y1, 156, uiRunRow, uidRunEnable)
 	u.chkElevate = u.mk("BUTTON", "需要管理员权限",
-		btnStyle|bsAutoCheckBox, 188, y1, 124, 22, uidRunElevate)
+		btnStyle|bsAutoCheckBox, 188, y1, 124, uiRunRow, uidRunElevate)
 	u.mk("STATIC", "延迟", wsChild|wsVisible|ssLeft, 318, y1+3, 30, 18, 0)
 	u.edRunDelay = u.mk("EDIT", "",
 		wsChild|wsVisible|wsTabStop|wsBorder|esCenter|esNumber,
-		352, y1, 46, 22, uidRunDelay)
+		352, y1, 46, uiRunRow, uidRunDelay)
 	sendMsg(u.edRunDelay, emSetLimitText, 4, 0)
 	u.mk("STATIC", "秒后执行", wsChild|wsVisible|ssLeft, 404, y1+3, 64, 18, 0)
 	u.btnRunNow = u.mk("BUTTON", "立即运行", btnStyle|bsPushButton,
-		622, y1, 120, 22, uidRunNow)
+		uiInnerR-120, y1, 120, uiRunRow, uidRunNow)
 
-	y2 := L.runTop + 48
-	u.mk("STATIC", "程序", wsChild|wsVisible|ssLeft, 24, y2+4, 36, 18, 0)
+	y2 := y1 + 30
+	u.mk("STATIC", "程序", wsChild|wsVisible|ssLeft, uiInnerX, y2+3, 36, 18, 0)
 	u.edRunPath = u.mk("EDIT", "",
 		wsChild|wsVisible|wsTabStop|wsBorder|esLeft|esAutoHScroll,
-		64, y2, 580, 24, uidRunPath)
+		uiRunEditX, y2, uiInnerR-uiRunBtnW-8-uiRunEditX, uiRunRow, uidRunPath)
 	u.btnBrowse = u.mk("BUTTON", "浏览…", btnStyle|bsPushButton,
-		652, y2, 90, 24, uidRunBrowse)
+		uiInnerR-uiRunBtnW, y2, uiRunBtnW, uiRunRow, uidRunBrowse)
 
-	y3 := L.runTop + 76
-	u.mk("STATIC", "参数", wsChild|wsVisible|ssLeft, 24, y3+4, 36, 18, 0)
+	y3 := y2 + 30
+	u.mk("STATIC", "参数", wsChild|wsVisible|ssLeft, uiInnerX, y3+3, 36, 18, 0)
 	u.edRunArgs = u.mk("EDIT", "",
 		wsChild|wsVisible|wsTabStop|wsBorder|esLeft|esAutoHScroll,
-		64, y3, 678, 24, uidRunArgs)
+		uiRunEditX, y3, uiInnerR-uiRunEditX, uiRunRow, uidRunArgs)
 }
 
 // 注：「程序」「参数」「浏览」「延迟」全部保持可编辑，不跟着上面那个复选框
@@ -606,9 +624,6 @@ func (u *UI) onCommand(id, code int) {
 	case uidQuit:
 		app.quit()
 		return
-	case uidReset:
-		u.resetVisuals()
-		return
 	}
 
 	row, field, ok := rowFieldFromID(id)
@@ -659,37 +674,9 @@ func (u *UI) onCommand(id, code int) {
 	}
 }
 
-// resetVisuals 把名称、图标字符、图标底色恢复成默认值。
-// 只重置「外观」这三项——是否显示在托盘、电源计划属于功能性选择，保留不动。
-func (u *UI) resetVisuals() {
-	byKey := make(map[string]ModeItem)
-	for _, d := range defaultItems() {
-		byKey[d.Key] = d
-	}
-
-	cfg := app.cfg
-	u.loading = true
-	for i := range cfg.Items {
-		if i >= len(u.rows) {
-			break
-		}
-		d, ok := byKey[cfg.Items[i].Key]
-		if !ok {
-			continue
-		}
-		cfg.Items[i].Name = d.Name
-		cfg.Items[i].IconGlyph = d.IconGlyph
-		cfg.Items[i].IconColor = d.IconColor
-		setWindowText(u.rows[i][riName], d.Name)
-		setWindowText(u.rows[i][riGlyph], d.IconGlyph)
-		pInvalidateRectW.Call(u.rows[i][riColor], 0, 1)
-	}
-	u.loading = false
-
-	cfg.save()
-	app.onConfigChanged()
-	setWindowText(u.lblStatus, "已恢复默认外观 ✓")
-}
+// 注：曾经有过一个「恢复默认外观」按钮（resetVisuals）。它要写一份
+// defaultItems() 的副本，和多实例/多配置来源打架，价值又不如直接改三个输入框，
+// 已整块删除。
 
 // ---------------------------------------------------------------- 以管理员身份运行
 

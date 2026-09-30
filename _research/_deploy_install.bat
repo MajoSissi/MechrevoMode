@@ -11,7 +11,7 @@ rem So: copy here, start via the scheduled task in a separate step.
 rem Keep this file pure ASCII.
 setlocal
 
-set SRC=D:\User\Desktop\MechrevoMode\MechrevoMode.exe
+set SRC=D:\User\Desktop\MechrevoMode\build\MechrevoMode.exe
 set DST=D:\User\OneDrive\Programm\MechrevoMode\MechrevoMode.exe
 
 taskkill /F /IM MechrevoMode.exe > nul 2>&1

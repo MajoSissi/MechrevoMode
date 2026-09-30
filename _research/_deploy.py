@@ -16,7 +16,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _pub_test
 
-SRC = r"D:\User\Desktop\MechrevoMode\MechrevoMode.exe"
+SRC = r"D:\User\Desktop\MechrevoMode\build\MechrevoMode.exe"
 INSTALLED = r"D:\User\OneDrive\Programm\MechrevoMode\MechrevoMode.exe"
 TASK = "MechrevoMode"
 LOG = os.path.join(os.path.dirname(INSTALLED), "data", "log.txt")
