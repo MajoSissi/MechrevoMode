@@ -20,6 +20,7 @@ var (
 	gdi32    = syscall.NewLazyDLL("gdi32.dll")
 	comdlg32 = syscall.NewLazyDLL("comdlg32.dll")
 	powrprof = syscall.NewLazyDLL("powrprof.dll")
+	wtsapi32 = syscall.NewLazyDLL("wtsapi32.dll")
 )
 
 // ---------------------------------------------------------------- user32
@@ -411,6 +412,16 @@ var (
 	pPowerGetActiveScheme  = powrprof.NewProc("PowerGetActiveScheme")
 )
 
+// ================================================================ 会话通知：wtsapi32
+//
+// 用来拿到「会话解锁」。这一步必须登记到窗口上：Windows 不会把会话变化广播给
+// 没登记过的窗口（WM_POWERBROADCAST 是不请自来的，这条不是）。
+
+var (
+	pWTSRegisterSessionNotification   = wtsapi32.NewProc("WTSRegisterSessionNotification")
+	pWTSUnRegisterSessionNotification = wtsapi32.NewProc("WTSUnRegisterSessionNotification")
+)
+
 // ================================================================ 主界面常量
 
 const (
@@ -482,6 +493,29 @@ const (
 	wmInitDialog      = 0x0110
 	wmQueryEndSession = 0x0011
 	wmEndSession      = 0x0016
+
+	// 电源事件。WM_POWERBROADCAST 会被主动广播给所有**顶层**窗口
+	// （本程序那个不可见的托盘消息窗口就是顶层窗口，所以收得到）；
+	// 而 WM_WTSSESSION_CHANGE 必须先 WTSRegisterSessionNotification 登记。
+	wmPowerBroadcast   = 0x0218
+	wmWtsSessionChange = 0x02B1
+
+	// WM_POWERBROADCAST 的 wparam：系统要睡了
+	pbtAPMSuspend = 0x0004
+
+	// WM_POWERBROADCAST 的 wparam：系统醒了。
+	// 一次唤醒可能连来好几条：AUTOMATIC 先到（无论谁唤醒的），
+	// 若是用户操作唤醒的，随后再补 RESUMESUSPEND / RESUMESTANDBY。
+	pbtAPMResumeCritical  = 0x0006
+	pbtAPMResumeSuspend   = 0x0007
+	pbtAPMResumeStandby   = 0x0008
+	pbtAPMResumeAutomatic = 0x0012
+
+	// WM_WTSSESSION_CHANGE 的 wparam
+	wtsSessionUnlock = 0x7
+
+	// WTSRegisterSessionNotification 的 flags：只关心自己这个会话
+	notifyForThisSession = 0
 
 	scMinimize = 0xF020
 	scClose    = 0xF060

@@ -40,12 +40,19 @@ type Config struct {
 	Items       []ModeItem `json:"items"`        // 模式项，顺序即托盘菜单顺序
 	CurKey      string     `json:"cur_key"`      // 当前选中的档位 Key
 
-	// 启动命令：程序启动后延迟若干秒执行一次，用于 ryzenadj 之类的降压/调优工具
-	RunEnabled bool   `json:"run_enabled"`   // 是否启用
+	// 启动命令：在满足触发条件的那一刻执行一次，用于 ryzenadj 之类的降压/调优工具
+	RunEnabled bool   `json:"run_enabled"`   // 总开关
 	RunPath    string `json:"run_path"`      // 可执行文件完整路径
 	RunArgs    string `json:"run_args"`      // 命令行参数
 	RunDelay   int    `json:"run_delay_sec"` // 延迟秒数，0 = 立即
 	RunElevate bool   `json:"run_elevate"`   // 以管理员身份运行（会弹 UAC）
+
+	// 触发时机，可任意组合；三个都不勾 = 只保留「立即运行」按钮手动触发。
+	// 三者分列（而不是一个下拉框）是因为实际用法里它们经常叠加：
+	// 开机要跑一次、合盖再打开还要再跑一次，而这两种场景的解法完全不同。
+	RunOnLaunch bool `json:"run_on_launch"` // 程序启动后（含开机自启）
+	RunOnResume bool `json:"run_on_resume"` // 系统从睡眠/休眠唤醒后
+	RunOnUnlock bool `json:"run_on_unlock"` // 会话解锁后（含唤醒后输密码解锁）
 
 	// PlanAlias 记录「内置模板方案 GUID -> 本机实际方案 GUID」。
 	// 「卓越性能」之类的模板方案必须先 powercfg -duplicatescheme 复制一份才能激活，
@@ -127,12 +134,17 @@ func (m ModeItem) origLabel() string {
 	return "未知"
 }
 
+// configVersion 当前配置格式版本。
+// 每次改动 Config 的字段含义都要 +1，并在 migrateRunTriggers 一类的地方写清这次迁移为谁服务。
+const configVersion = 7
+
 func defaultConfig() *Config {
 	return &Config{
-		Version:     6,
+		Version:     configVersion,
 		ClientIndex: -1,
 		Items:       defaultItems(),
 		PlanAlias:   map[string]string{},
+		RunOnLaunch: true, // 默认行为与老版本一致：程序启动后跑一次
 	}
 }
 
@@ -261,6 +273,9 @@ func loadConfig() *Config {
 		RunArgs     string            `json:"run_args"`
 		RunDelay    int               `json:"run_delay_sec"`
 		RunElevate  bool              `json:"run_elevate"`
+		RunOnLaunch bool              `json:"run_on_launch"`
+		RunOnResume bool              `json:"run_on_resume"`
+		RunOnUnlock bool              `json:"run_on_unlock"`
 		PlanAlias   map[string]string `json:"plan_alias"`
 
 		Mode    int `json:"mode"`    // v1
@@ -269,8 +284,11 @@ func loadConfig() *Config {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return defaultConfig()
 	}
+	// 版本要在这里立刻抓下来：下面紧接着就会把它改成当前版本，
+	// 而迁移判断只能依据「文件里写着的那个」。
+	rawVer := raw.Version
 
-	cfg.Version = 6
+	cfg.Version = configVersion
 	cfg.AutoStart = raw.AutoStart
 	cfg.AutoElevate = raw.AutoElevate
 	cfg.ClientIndex = raw.ClientIndex
@@ -279,6 +297,10 @@ func loadConfig() *Config {
 	cfg.RunArgs = raw.RunArgs
 	cfg.RunDelay = raw.RunDelay
 	cfg.RunElevate = raw.RunElevate
+	cfg.RunOnLaunch = raw.RunOnLaunch
+	cfg.RunOnResume = raw.RunOnResume
+	cfg.RunOnUnlock = raw.RunOnUnlock
+	migrateRunTriggers(rawVer, cfg)
 	cfg.PlanAlias = map[string]string{}
 	for k, v := range raw.PlanAlias {
 		if k != "" && v != "" {
@@ -301,6 +323,21 @@ func loadConfig() *Config {
 		cfg.CurKey = keyBalance
 	}
 	return cfg
+}
+
+// migrateRunTriggers 补全启动命令的「触发时机」。
+//
+// v6 及更早只有「程序启动后跑一次」这一种行为，配置里也没有这三个字段。
+// 照字面读进来的话它们全是 false，升级后原本会跑的命令突然就不跑了 ——
+// 而用户根本不知道多了这么一个开关，只会觉得「新版把我的降压搞坏了」。
+// 所以缺字段的老配置一律归一到老行为。
+//
+// 反过来，v7 起一律以文件为准：用户可以把三个都取消勾选，
+// 那是在新界面里主动做的选择，不能被迁移逻辑再给填回去。
+func migrateRunTriggers(rawVer int, cfg *Config) {
+	if rawVer < configVersion {
+		cfg.RunOnLaunch = true
+	}
 }
 
 // legacyDefaults 各档位在历史版本里用过的默认外观。

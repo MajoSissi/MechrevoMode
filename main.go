@@ -56,6 +56,16 @@ type App struct {
 	tipWG     sync.WaitGroup
 	logFile   *os.File
 
+	// 启动命令的调度状态。三个触发时机（程序启动 / 系统唤醒 / 会话解锁）
+	// 在系统眼里有一段是重叠的：合盖再打开会先来唤醒广播、紧接着又解锁一次，
+	// 于是一次操作能被翻译成好几次「该跑了」。这里把它收敛成一件事。
+	runMu      sync.Mutex
+	runTimer   *time.Timer // 正在等待执行的那一趟；nil = 当前没有排着的
+	runAskedAt time.Time   // 上一次提出「跑一次」的时刻，用于合并同一串事件
+	runCount   int         // 本次进程内实际执行过几次（日志/诊断用）
+
+	wtsRegistered bool // 是否已登记会话通知（WM_WTSSESSION_CHANGE）
+
 	pendMu   sync.Mutex
 	pendText string
 	runMsg   string // 最近一次手动运行的结果，供 UI 线程显示
@@ -826,6 +836,149 @@ func (a *App) runStartupCommand() (ok bool, detail string) {
 	return true, "已启动"
 }
 
+// ---------------------------------------------------------------- 启动命令：触发时机
+//
+// 为什么非得有「时机」这个概念不可：降压 / 风扇曲线这类设置在机器睡过一觉之后会被
+// 固件或驱动拉回默认值，而托盘程序自己**从不睡** —— 它从头到尾没退出过，
+// 自然也不会有第二次「程序启动」来把命令重跑一遍。所以只支持「开机跑一次」是不够的，
+// 得能表达「每次从睡眠/休眠回来都要跑一次」。
+//
+// 三个时机各管一件事，可任意组合：
+//
+//	程序启动   冷启动、开机自启、用户双击本程序
+//	系统唤醒   合盖再打开、休眠再开机、连接待机返回
+//	会话解锁   命令只有在用户登录会话里才有效时（带界面的小工具、要用网络凭据的脚本）
+//
+// 它们在实际使用中有重叠：一次「合盖再打开」会被 Windows 翻译成「唤醒广播」若干条
+// + 「会话解锁」一条。本程序不去猜该过滤哪一条，只按时间合并，见 scheduleRun。
+
+const (
+	// runCoalesceWindow 同一串事件的合并窗口。
+	//
+	// 上文那几条消息的间隔从几十毫秒到几秒不等，条数取决于是谁把机器叫醒的：
+	// AUTOMATIC 一定会有，用户一动设备再补 RESUMESUSPEND，接着多半还有一次解锁。
+	// 指望它们按固定顺序排队是不可能的，所以这里不看条数只看时间 ——
+	// 窗口内又有人要求跑一次，就把排着的那趟重新计时，最后一次说了算。
+	runCoalesceWindow = 5 * time.Second
+
+	// resumeRunGrace 唤醒后额外的最短等待（秒）。
+	// 刚落地的头几秒磁盘还在转起来、网络也没回来，这时候把命令拉出去，
+	// 第三方工具的失败是静默的 —— 本程序不捕获也不解释它们的退出码
+	// （见 runStartupCommand），用户只会看到「似乎没生效」。
+	resumeRunGrace = 3
+)
+
+// runConfigured 命令有没有配齐：启用开关 + 路径都填了才算数。
+func (a *App) runConfigured() bool {
+	return a.cfg.RunEnabled && strings.TrimSpace(a.cfg.RunPath) != ""
+}
+
+// triggerRunAfterLaunch 程序刚起来的那一趟。放在 GCU 同步之后，避免被模式切换覆盖。
+func (a *App) triggerRunAfterLaunch() {
+	if !a.runConfigured() {
+		return
+	}
+	if !a.cfg.RunOnLaunch {
+		a.logf("启动命令：已配置但未勾选「程序启动时」")
+		return
+	}
+	a.logf("提示：本进程当前提权=%v。需要写 MSR 的工具（ryzenadj 之类）必须提权才能工作，"+
+		"请勾选「以管理员身份运行」，或单独给启动命令勾「需要管理员权限」", isElevated())
+	a.scheduleRun("程序启动", 0)
+}
+
+// triggerRunAfterResume 系统从睡眠 / 休眠回来的那一趟
+func (a *App) triggerRunAfterResume() {
+	if !a.runConfigured() || !a.cfg.RunOnResume {
+		return
+	}
+	a.scheduleRun("系统唤醒", resumeRunGrace)
+}
+
+// triggerRunAfterUnlock 会话解锁的那一趟
+func (a *App) triggerRunAfterUnlock() {
+	if !a.runConfigured() || !a.cfg.RunOnUnlock {
+		return
+	}
+	a.scheduleRun("会话解锁", 0)
+}
+
+// scheduleRun 安排一次执行。minDelay 是该时机自带的最短等待（秒），0 = 不额外加。
+//
+// 同一串事件里的重复诉求会被合并；间隔超过合并窗口的则各跑各的 —— 后者说明
+// 中间真的隔了一件事（比如用户慢慢输了密码才解锁），那一次也是用户要的。
+func (a *App) scheduleRun(trigger string, minDelay int) {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
+
+	now := time.Now()
+	if prev := now.Sub(a.runAskedAt); a.runTimer != nil && prev <= runCoalesceWindow {
+		a.runTimer.Stop()
+		a.runTimer = nil
+		a.logf("启动命令：%s 距上一次触发仅 %v，合并为一次执行",
+			trigger, prev.Round(time.Millisecond))
+	}
+	a.runAskedAt = now
+
+	d := a.cfg.RunDelay
+	if d < 0 {
+		d = 0
+	}
+	if d < minDelay {
+		d = minDelay
+	}
+	a.runTimer = time.AfterFunc(time.Duration(d)*time.Second, func() { a.fireRun(trigger) })
+	a.logf("启动命令：已安排，触发来源=%s，%d 秒后执行", trigger, d)
+}
+
+// fireRun 延迟走完之后真正把命令拉起来。
+//
+// 一次安排只对应一次 fireRun，所以这里是清掉自己那条等待的地方；
+// 拉进程、弹 UAC 这些慢活都在锁外，别把下一次安排挡在外面。
+func (a *App) fireRun(trigger string) {
+	a.runMu.Lock()
+	a.runTimer = nil
+	a.runCount++
+	n := a.runCount
+	a.runMu.Unlock()
+
+	a.logf("启动命令[%s]：开始执行（本进程第 %d 次）", trigger, n)
+	ok, detail := a.runStartupCommand()
+	if !ok {
+		a.logf("启动命令[%s] 未能启动: %s", trigger, detail)
+		a.queueBalloon("启动命令执行失败", trigger+"："+detail)
+	}
+
+	// 界面开着的话顺便更新状态栏：和手动点「立即运行」走同一条路
+	a.pendMu.Lock()
+	a.runMsg = trigger + "：" + detail
+	a.pendMu.Unlock()
+	if a.hwnd != 0 {
+		v := uintptr(0)
+		if ok {
+			v = 1
+		}
+		pPostMessageW.Call(a.hwnd, wmRunDone, v, 0)
+	}
+}
+
+// onSystemResume 收到唤醒广播。
+func (a *App) onSystemResume(code uintptr) {
+	reason := "未知"
+	switch code {
+	case pbtAPMResumeAutomatic:
+		reason = "自动唤醒"
+	case pbtAPMResumeSuspend:
+		reason = "睡眠/休眠后恢复"
+	case pbtAPMResumeStandby:
+		reason = "待机后恢复"
+	case pbtAPMResumeCritical:
+		reason = "电量耗尽后恢复"
+	}
+	a.logf("系统唤醒（%s，code=0x%X）", reason, code)
+	a.triggerRunAfterResume()
+}
+
 // ---------------------------------------------------------------- 退出
 
 func (a *App) quit() {
@@ -918,7 +1071,30 @@ func (a *App) wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
 		pDestroyWindow.Call(a.hwnd)
 		return 0
 
+	case wmPowerBroadcast:
+		// 电源事件是广播过来的，处理了就要回 TRUE。
+		switch wparam {
+		case pbtAPMSuspend:
+			a.logf("系统进入睡眠/休眠")
+			return 1
+		case pbtAPMResumeAutomatic, pbtAPMResumeSuspend, pbtAPMResumeStandby, pbtAPMResumeCritical:
+			a.onSystemResume(wparam)
+			return 1
+		}
+
+	case wmWtsSessionChange:
+		if wparam == wtsSessionUnlock {
+			a.logf("会话解锁")
+			a.triggerRunAfterUnlock()
+			return 0
+		}
+
 	case wmDestroy:
+		// 会话通知是登记的，销毁前要注销，否则系统还留着一个指向已销毁窗口的注册项
+		if a.wtsRegistered {
+			pWTSUnRegisterSessionNotification.Call(a.hwnd)
+			a.wtsRegistered = false
+		}
 		a.removeTrayIcon()
 		a.stopTipTimer()
 		pPostQuitMessage.Call(0)
@@ -962,6 +1138,17 @@ func (a *App) createWindow() bool {
 		return false
 	}
 	a.hwnd = hwnd
+
+	// 登记会话通知，用来支持「解锁后运行」这一触发时机。
+	//
+	// 和电源广播不同，WM_WTSSESSION_CHANGE 不登记是收不到的。
+	// 失败只记一行日志：它是唯一依赖这项登记的时机，勾了却没生效的话界面上
+	// 看不出来，所以在日志里写明白；其余功能一概不受影响。
+	if r, _, err := pWTSRegisterSessionNotification.Call(a.hwnd, notifyForThisSession); r == 0 {
+		a.logf("WTSRegisterSessionNotification 失败: %v ——「解锁屏幕后」这一时机不会生效", winErr(err))
+	} else {
+		a.wtsRegistered = true
+	}
 	return true
 }
 
@@ -1190,25 +1377,8 @@ func main() {
 		isElevated(), app.cfg.AutoStart, autostartMechanism, app.cfg.AutoElevate,
 		app.cfg.trayItems(), smallIconSize())
 
-	// 启动命令：延迟若干秒执行一次（放在 GCU 同步之后，避免被模式切换覆盖）
-	if app.cfg.RunEnabled && strings.TrimSpace(app.cfg.RunPath) != "" {
-		if !isElevated() {
-			app.logf("提示：本进程当前不是管理员（提权=%v）。需要写 MSR 的工具如 ryzenadj 会失败，"+
-				"请勾选「以管理员身份运行」，或给启动命令单独勾「需要管理员权限」",
-				isElevated())
-		}
-		d := app.cfg.RunDelay
-		if d < 0 {
-			d = 0
-		}
-		a := app
-		go func() {
-			time.Sleep(time.Duration(d) * time.Second)
-			if ok, detail := a.runStartupCommand(); !ok {
-				a.queueBalloon("启动命令执行失败", detail)
-			}
-		}()
-	}
+	// 启动命令：按勾选的时机把命令拉起来（见 runStartupCommand）
+	app.triggerRunAfterLaunch()
 
 	if firstRun || hasArg("-show") || hasArg("--show") {
 		app.showSettings()

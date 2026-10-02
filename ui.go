@@ -45,7 +45,9 @@ const (
 	uiColPlanX  = 498
 	uiColPlanW  = uiInnerR - uiColPlanX // 258
 
-	uiRunH     = 118 // 启动命令分组框高度：3 行 + 上下内边距
+	// 启动命令区块：4 行（开关行 / 触发时机 / 程序 / 参数）
+	uiRunH     = 148 // 分组框高度：22 起头 + uiRunRows×30 + 下边距，行数变了要同步
+	uiRunRows  = 4   // 区块行数；ui_test.go 里有对应的防溢出回归测试
 	uiRunRow   = 24  // 区块内控件统一高度
 	uiRunEditX = 64  // 区块内输入框左边缘
 	uiRunBtnW  = 90  // 区块内「浏览…」宽度
@@ -82,6 +84,11 @@ const (
 	uidRunDelay   = 114
 	uidRunElevate = 115
 	uidRunNow     = 116
+
+	// 触发时机：程序启动 / 睡眠·休眠唤醒 / 会话解锁
+	uidRunOnLaunch = 117
+	uidRunOnResume = 118
+	uidRunOnUnlock = 119
 
 	uidSave    = 900
 	uidQuit    = 901
@@ -131,13 +138,16 @@ type UI struct {
 	btnQuit        uintptr
 
 	// 启动命令区块
-	chkRun     uintptr
-	chkElevate uintptr
-	edRunPath  uintptr
-	btnBrowse  uintptr
-	edRunArgs  uintptr
-	edRunDelay uintptr
-	btnRunNow  uintptr
+	chkRun         uintptr
+	chkElevate     uintptr
+	chkRunOnLaunch uintptr
+	chkRunOnResume uintptr
+	chkRunOnUnlock uintptr
+	edRunPath      uintptr
+	btnBrowse      uintptr
+	edRunArgs      uintptr
+	edRunDelay     uintptr
+	btnRunNow      uintptr
 
 	planOpts []powerPlan
 	custCols [16]uint32
@@ -295,35 +305,46 @@ func (u *UI) createRunSection(L uiLayout, btnStyle uintptr) {
 	u.mk("BUTTON", "启动命令",
 		wsChild|wsVisible|bsGroupBox, uiMargin, L.runTop, uiBoxW, uiRunH, 0)
 
-	// 三行一律 uiRunRow 高、行距 30，最后一行的下沿距分组框 uiPad。
-	// 原先 y3 的下沿是 runTop+100 而分组框只有 96 高，「参数」框会压在边框上。
+	// 四行一律 uiRunRow 高、行距 30。行数变了要同步 uiRunRows 与 uiRunH，
+	// 否则最后一行会压到分组框下边框上（ui_test.go 盯着这件事）。
 	y1 := L.runTop + 22
-	u.chkRun = u.mk("BUTTON", "程序启动后运行命令",
-		btnStyle|bsAutoCheckBox, uiInnerX, y1, 156, uiRunRow, uidRunEnable)
+	u.chkRun = u.mk("BUTTON", "启用命令",
+		btnStyle|bsAutoCheckBox, uiInnerX, y1, 92, uiRunRow, uidRunEnable)
 	u.chkElevate = u.mk("BUTTON", "需要管理员权限",
-		btnStyle|bsAutoCheckBox, 188, y1, 124, uiRunRow, uidRunElevate)
-	u.mk("STATIC", "延迟", wsChild|wsVisible|ssLeft, 318, y1+3, 30, 18, 0)
+		btnStyle|bsAutoCheckBox, 124, y1, 130, uiRunRow, uidRunElevate)
+	u.mk("STATIC", "延迟", wsChild|wsVisible|ssLeft, 262, y1+3, 30, 18, 0)
 	u.edRunDelay = u.mk("EDIT", "",
 		wsChild|wsVisible|wsTabStop|wsBorder|esCenter|esNumber,
-		352, y1, 46, uiRunRow, uidRunDelay)
+		296, y1, 46, uiRunRow, uidRunDelay)
 	sendMsg(u.edRunDelay, emSetLimitText, 4, 0)
-	u.mk("STATIC", "秒后执行", wsChild|wsVisible|ssLeft, 404, y1+3, 64, 18, 0)
-	u.btnRunNow = u.mk("BUTTON", "立即运行", btnStyle|bsPushButton,
-		uiInnerR-120, y1, 120, uiRunRow, uidRunNow)
+	u.mk("STATIC", "秒后执行", wsChild|wsVisible|ssLeft, 348, y1+3, 64, 18, 0)
 
+	// 触发时机。三个复选框而不是一个下拉框：开机要跑、合盖再打开还要跑，
+	// 这两种诉求可以叠加，下拉框表达不了「两个都要」。
 	y2 := y1 + 30
-	u.mk("STATIC", "程序", wsChild|wsVisible|ssLeft, uiInnerX, y2+3, 36, 18, 0)
-	u.edRunPath = u.mk("EDIT", "",
-		wsChild|wsVisible|wsTabStop|wsBorder|esLeft|esAutoHScroll,
-		uiRunEditX, y2, uiInnerR-uiRunBtnW-8-uiRunEditX, uiRunRow, uidRunPath)
-	u.btnBrowse = u.mk("BUTTON", "浏览…", btnStyle|bsPushButton,
-		uiInnerR-uiRunBtnW, y2, uiRunBtnW, uiRunRow, uidRunBrowse)
+	u.mk("STATIC", "触发时机", wsChild|wsVisible|ssLeft, uiInnerX, y2+3, 56, 18, 0)
+	u.chkRunOnLaunch = u.mk("BUTTON", "程序启动时",
+		btnStyle|bsAutoCheckBox, 86, y2, 96, uiRunRow, uidRunOnLaunch)
+	u.chkRunOnResume = u.mk("BUTTON", "睡眠/休眠唤醒后",
+		btnStyle|bsAutoCheckBox, 188, y2, 132, uiRunRow, uidRunOnResume)
+	u.chkRunOnUnlock = u.mk("BUTTON", "解锁屏幕后",
+		btnStyle|bsAutoCheckBox, 326, y2, 104, uiRunRow, uidRunOnUnlock)
+	u.btnRunNow = u.mk("BUTTON", "立即运行", btnStyle|bsPushButton,
+		uiInnerR-120, y2, 120, uiRunRow, uidRunNow)
 
 	y3 := y2 + 30
-	u.mk("STATIC", "参数", wsChild|wsVisible|ssLeft, uiInnerX, y3+3, 36, 18, 0)
+	u.mk("STATIC", "程序", wsChild|wsVisible|ssLeft, uiInnerX, y3+3, 36, 18, 0)
+	u.edRunPath = u.mk("EDIT", "",
+		wsChild|wsVisible|wsTabStop|wsBorder|esLeft|esAutoHScroll,
+		uiRunEditX, y3, uiInnerR-uiRunBtnW-8-uiRunEditX, uiRunRow, uidRunPath)
+	u.btnBrowse = u.mk("BUTTON", "浏览…", btnStyle|bsPushButton,
+		uiInnerR-uiRunBtnW, y3, uiRunBtnW, uiRunRow, uidRunBrowse)
+
+	y4 := y3 + 30
+	u.mk("STATIC", "参数", wsChild|wsVisible|ssLeft, uiInnerX, y4+3, 36, 18, 0)
 	u.edRunArgs = u.mk("EDIT", "",
 		wsChild|wsVisible|wsTabStop|wsBorder|esLeft|esAutoHScroll,
-		uiRunEditX, y3, uiInnerR-uiRunEditX, uiRunRow, uidRunArgs)
+		uiRunEditX, y4, uiInnerR-uiRunEditX, uiRunRow, uidRunArgs)
 }
 
 // 注：「程序」「参数」「浏览」「延迟」全部保持可编辑，不跟着上面那个复选框
@@ -343,6 +364,9 @@ func (u *UI) loadFromConfig() {
 	checkDlgButton(u.chkAutoElevate, cfg.AutoElevate)
 	checkDlgButton(u.chkRun, cfg.RunEnabled)
 	checkDlgButton(u.chkElevate, cfg.RunElevate)
+	checkDlgButton(u.chkRunOnLaunch, cfg.RunOnLaunch)
+	checkDlgButton(u.chkRunOnResume, cfg.RunOnResume)
+	checkDlgButton(u.chkRunOnUnlock, cfg.RunOnUnlock)
 	setWindowText(u.edRunPath, cfg.RunPath)
 	setWindowText(u.edRunArgs, cfg.RunArgs)
 	setWindowText(u.edRunDelay, strconv.Itoa(cfg.RunDelay))
@@ -406,6 +430,9 @@ func (u *UI) applyFromControls() {
 
 	cfg.RunEnabled = isChecked(u.chkRun)
 	cfg.RunElevate = isChecked(u.chkElevate)
+	cfg.RunOnLaunch = isChecked(u.chkRunOnLaunch)
+	cfg.RunOnResume = isChecked(u.chkRunOnResume)
+	cfg.RunOnUnlock = isChecked(u.chkRunOnUnlock)
 	cfg.RunPath = strings.TrimSpace(getWindowText(u.edRunPath, 1024))
 	cfg.RunArgs = strings.TrimSpace(getWindowText(u.edRunArgs, 1024))
 	if n, err := strconv.Atoi(strings.TrimSpace(getWindowText(u.edRunDelay, 16))); err == nil && n >= 0 && n <= 3600 {
@@ -523,6 +550,12 @@ func (u *UI) commit(verbose bool) {
 			// 需要提权时走的是计划任务，任务管理器里看不到，这里讲明以免用户以为没设上
 			msg = "已保存 ✓ 开机自启：" + autostartMechanism
 		}
+		// 开了总开关却一个触发时机都没勾：命令永远不会自己跑，
+		// 不说一句的话用户会以为是命令坏了。
+		if cfg.RunEnabled && strings.TrimSpace(cfg.RunPath) != "" &&
+			!cfg.RunOnLaunch && !cfg.RunOnResume && !cfg.RunOnUnlock {
+			msg += " ⚠ 未勾选触发时机，只有「立即运行」会执行"
+		}
 		setWindowText(u.lblStatus, msg)
 	}
 }
@@ -604,6 +637,23 @@ func (u *UI) onCommand(id, code int) {
 	case uidRunElevate:
 		cfg.RunElevate = isChecked(u.chkElevate)
 		u.commit(false)
+		return
+	case uidRunOnLaunch:
+		cfg.RunOnLaunch = isChecked(u.chkRunOnLaunch)
+		u.commit(false)
+		return
+	case uidRunOnResume:
+		cfg.RunOnResume = isChecked(u.chkRunOnResume)
+		u.commit(false)
+		return
+	case uidRunOnUnlock:
+		// 「解锁屏幕后」依赖 WTSRegisterSessionNotification 登记成功，
+		// 登记失败时 createWindow 已经写过日志，这里补一句能看见的反馈。
+		cfg.RunOnUnlock = isChecked(u.chkRunOnUnlock)
+		u.commit(false)
+		if cfg.RunOnUnlock && !app.wtsRegistered {
+			setWindowText(u.lblStatus, "已勾选，但会话通知登记失败，「解锁屏幕后」不会生效（详见日志）")
+		}
 		return
 	case uidRunNow:
 		u.runNow()

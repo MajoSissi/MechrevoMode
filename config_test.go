@@ -100,6 +100,31 @@ func TestOrigLabel(t *testing.T) {
 	}
 }
 
+// 启动命令的「触发时机」是后来加的字段，老配置里一个都没有。
+// 照字面读出来的话三个都是 false，升级后原本会跑的命令突然不跑了 ——
+// 而用户根本不知道多了这么一排开关，只会觉得「新版把我的降压搞坏了」。
+func TestRunTriggerMigration(t *testing.T) {
+	// v6 及更早：归一到「程序启动时」，也就是它们在旧版本里的唯一行为
+	old := &Config{RunEnabled: true, RunPath: `C:\tools\ryzenadj.exe`}
+	migrateRunTriggers(configVersion-1, old)
+	if !old.RunOnLaunch {
+		t.Error("旧配置没有被归一到「程序启动时」，升级后启动命令会静默失效")
+	}
+	if old.RunOnResume || old.RunOnUnlock {
+		t.Error("迁移不该替用户打开新开关：只还原旧行为，不多给")
+	}
+
+	// v7 起以文件为准：用户可以主动把三个都关掉，不能被迁移逻辑再填回来
+	cur := &Config{RunEnabled: true, RunOnResume: true}
+	migrateRunTriggers(configVersion, cur)
+	if cur.RunOnLaunch {
+		t.Error("当前版本的配置被迁移逻辑改写了，用户取消勾选会被覆盖")
+	}
+	if !cur.RunOnResume {
+		t.Error("当前版本配置应当以文件为准")
+	}
+}
+
 // 迁移逻辑依赖 legacyConfigDir 指的确实是旧位置（%APPDATA%\MechrevoMode）。
 // 它要是和新位置重合，migrateLegacyConfig 就会自己搬给自己。
 func TestLegacyConfigDir(t *testing.T) {
